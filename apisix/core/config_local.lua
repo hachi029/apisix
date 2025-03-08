@@ -55,6 +55,7 @@ end
 -- local local_conf = core.config.local_conf()
 -- local fallback_sni = core.table.try_read_attr(
 --                        local_conf, "apisix", "ssl", "fallback_sni") -- "a.test2.com"
+-- 读取本地配置conf/config.yaml并与默认配置合并
 function _M.local_conf(force)
     if not force and config_data then
         return config_data

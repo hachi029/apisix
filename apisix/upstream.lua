@@ -274,6 +274,7 @@ function _M.set_by_route(route, api_ctx)
     end
     -- core.log.info("up_conf: ", core.json.delay_encode(up_conf, true))
 
+    -- service_name 与nodes 二选一，用于服务发现
     if up_conf.service_name then
         if not discovery then
             return 503, "discovery is uninitialized"
@@ -330,6 +331,7 @@ function _M.set_by_route(route, api_ctx)
         return HTTP_CODE_UPSTREAM_UNAVAILABLE, "no valid upstream node"
     end
 
+    -- subsystem非http代理
     if not is_http then
         local ok, err = fill_node_info(up_conf, nil, true)
         if not ok then
@@ -547,7 +549,7 @@ function _M.check_upstream_conf(conf)
     return check_upstream_conf(false, conf)
 end
 
-
+-- parent可能是service或route
 local function filter_upstream(value, parent)
     if not value then
         return
@@ -564,6 +566,8 @@ local function filter_upstream(value, parent)
         return
     end
 
+    -- nodes如果是array, 仅仅更新parent.has_domain
+    -- nodes如果不是array, 改为array, 更新parent.has_domain
     local nodes = value.nodes
     if core.table.isarray(nodes) then
         for _, node in ipairs(nodes) do

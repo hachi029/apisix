@@ -137,7 +137,7 @@ local function parse_addr(addr)
     return {host = host, port = port}, err
 end
 
-
+-- 主要是与upstream交互的超时时间、重试等相关参数
 -- set_balancer_opts will be called in balancer phase and before any tries
 local function set_balancer_opts(route, ctx)
     local up_conf = ctx.upstream_conf
@@ -338,7 +338,7 @@ do
     end
 end
 
-
+-- init.lua http_balancer_phase -> this.run
 function _M.run(route, ctx, plugin_funcs)
     local server, err
 
@@ -346,7 +346,7 @@ function _M.run(route, ctx, plugin_funcs)
         -- use the server picked in the access phase
         server = ctx.picked_server
         ctx.picked_server = nil
-
+        --设置超时、重试等相关参数
         set_balancer_opts(route, ctx)
 
     else
@@ -383,6 +383,7 @@ function _M.run(route, ctx, plugin_funcs)
 
     core.log.info("proxy request to ", server.host, ":", server.port)
 
+    --设置upstream的 keepalive_pool set_peer
     local ok, err = set_current_peer(server, ctx)
     if not ok then
         core.log.error("failed to set server peer [", server.host, ":",
