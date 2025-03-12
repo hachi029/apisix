@@ -80,8 +80,9 @@ local has_mod, apisix_ngx_client = pcall(require, "resty.apisix.client")
 
 local _M = {version = 0.4}
 
-
+-- init_by_lua
 function _M.http_init(args)
+    --初始化dns解析
     core.resolver.init_resolver(args)
     core.id.init()
     core.env.init()
@@ -92,6 +93,7 @@ function _M.http_init(args)
         core.log.error("failed to enable privileged_agent: ", err)
     end
 
+    -- core.config.config_etcd.init
     if core.config.init then
         local ok, err = core.config.init()
         if not ok then
@@ -102,7 +104,7 @@ function _M.http_init(args)
     xrpc.init()
 end
 
-
+-- init_worker_by_lua
 function _M.http_init_worker()
     local seed, err = core.utils.get_seed_from_urandom()
     if not seed then
@@ -238,6 +240,7 @@ local function parse_domain_in_route(route)
     end
 
     local up_conf = route.dns_value and route.dns_value.upstream
+    -- 比较new_nodes 与up_conf是否相同，比较字段 包括host", "port", "weight", "priority", "metadata"
     local ok = upstream_util.compare_upstream_node(up_conf, new_nodes)
     if ok then
         return route
@@ -460,6 +463,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         up_id = api_ctx.upstream_id
     end
 
+    -- 如果router上配置了upstream_id
     if up_id then
         local upstream = apisix_upstream.get_by_id(up_id)
         if not upstream then
@@ -473,6 +477,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         api_ctx.matched_upstream = upstream
 
     else
+        -- 如果route上配置的是域名
         if route.has_domain then
             local err
             route, err = parse_domain_in_route(route)
@@ -489,9 +494,10 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 
         api_ctx.matched_upstream = (route.dns_value and
                                     route.dns_value.upstream)
-                                   or route_val.upstream
+                                   or route_val.upstream -- 如果是route上内嵌的upstream
     end
 
+    --ssl 相关
     if api_ctx.matched_upstream and api_ctx.matched_upstream.tls and
         api_ctx.matched_upstream.tls.client_cert_id then
 
@@ -524,6 +530,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
     -- load balancer is not required by kafka upstream, so the upstream
     -- node selection process is intercepted and left to kafka to
     -- handle on its own
+    -- kafka代理
     if api_ctx.matched_upstream and api_ctx.matched_upstream.scheme == "kafka" then
         return pubsub_kafka.access(api_ctx)
     end
@@ -542,6 +549,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 
     api_ctx.picked_server = server
 
+    -- 设置往upstream转发的请求头
     set_upstream_headers(api_ctx, server)
 
     -- run the before_proxy method in access phase first to avoid always reinit request
@@ -581,6 +589,7 @@ function _M.http_access_phase()
     debug.dynamic_debug(api_ctx)
 
     local uri = api_ctx.var.uri
+    -- if里边的逻辑主要是根据配置对uri格式化
     if local_conf.apisix then
         if local_conf.apisix.delete_uri_tail_slash then
             if str_byte(uri, #uri) == str_byte("/") then
@@ -609,6 +618,7 @@ function _M.http_access_phase()
     api_ctx.var.real_request_uri = api_ctx.var.request_uri
     api_ctx.var.request_uri = api_ctx.var.uri .. api_ctx.var.is_args .. (api_ctx.var.args or "")
 
+    -- 执行路由匹配
     router.router_http.match(api_ctx)
 
     local route = api_ctx.matched_route
@@ -627,6 +637,7 @@ function _M.http_access_phase()
 
     local enable_websocket = route.value.enable_websocket
 
+    -- plugin_config_id， 合并plugin_config配置 route.plugins合并plugin_config
     if route.value.plugin_config_id then
         local conf = plugin_config.get(route.value.plugin_config_id)
         if not conf then
@@ -645,7 +656,7 @@ function _M.http_access_phase()
                            "id: ", route.value.service_id)
             return core.response.exit(404)
         end
-
+        -- route.plugins合并service上配置的plugin
         route = plugin.merge_service_route(service, route)
         api_ctx.matched_route = route
         api_ctx.conf_type = "route&service"
@@ -767,7 +778,7 @@ local function set_resp_upstream_status(up_status)
     end
 end
 
-
+--主要是执行插件的header_filter方法
 function _M.http_header_filter_phase()
     core.response.set_header("Server", ver_header)
 

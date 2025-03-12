@@ -68,10 +68,12 @@ local health_check_shm_name = "etcd-cluster-health-check"
 if not is_http then
     health_check_shm_name = health_check_shm_name .. "-stream"
 end
-local created_obj  = {}
-local loaded_configuration = {}
-local watch_ctx
+local created_obj  = {}     -- key为/routes 或 /upstream 等， value 为 new(key, opts) 返回的对象
+local loaded_configuration = {} -- init_by_lua 阶段拉取的所有etcd的配置
+local watch_ctx -- main watch 上下文
 
+--总体思路是main-sub watch。 main-watch监听/apisix目录下所有更新，将更新保存到watch_ctx.res中，
+-- 然后通知所有sub-watch去处理数据。只有main-watch与etcd交互。
 
 local _M = {
     version = 0.3,
@@ -103,7 +105,7 @@ do
     end
 end
 
-
+-- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md#watchcancel
 local function cancel_watch(http_cli)
     local res, err = watch_ctx.cli:watchcancel(http_cli)
     if res == 1 then
@@ -113,7 +115,7 @@ local function cancel_watch(http_cli)
     end
 end
 
-
+-- 将watch到的数据存入watch_ctx.res，通知sub watch处理数据
 -- append res to the queue and notify pending watchers
 local function produce_res(res, err)
     if log_level >= NGX_INFO then
@@ -126,13 +128,14 @@ local function produce_res(res, err)
     table.clear(watch_ctx.sema)
 end
 
-
+-- main watch
 local function do_run_watch(premature)
     if premature then
         return
     end
 
     -- the main watcher first start
+    --if 里边逻辑只是获取最新reversion
     if watch_ctx.started == false then
         local local_conf, err = config_local.local_conf()
         if not local_conf then
@@ -201,7 +204,7 @@ local function do_run_watch(premature)
         if log_level >= NGX_INFO then
             log.info("res_func: ", inspect(res))
         end
-
+        -- 1.错误处理
         if not res then
             if err ~= "closed" and
                 err ~= "timeout" and
@@ -234,7 +237,8 @@ local function do_run_watch(premature)
             break
         end
 
-        -- cleanup
+        -- 2.cleanup, 此处也可以保证未被 watch的 res被清理掉，避免未消费的res持续占用内存
+        -- 找到watch_ctx.idx中最小项 min_idx = min(watch_ctx.idx)
         local min_idx = 0
         for _, idx in pairs(watch_ctx.idx) do
             if (min_idx == 0) or (idx < min_idx) then
@@ -242,14 +246,18 @@ local function do_run_watch(premature)
             end
         end
 
+        -- 1, min_idx-1 前的数据已经被处理过了，可以清理掉
         for i = 1, min_idx - 1 do
             watch_ctx.res[i] = false
         end
 
+        -- 清理已经被处理过的数据，涉及更新watch_ctx.idx和watch_ctx.res
         if min_idx > 100 then
+            -- 更新watch_ctx.idx，所有的idx = (idx - min_idx + 1)
             for k, idx in pairs(watch_ctx.idx) do
                 watch_ctx.idx[k] = idx - min_idx + 1
             end
+            -- 将watch_ctx.res所有元素左移
             -- trim the res table
             for i = 1, min_idx - 1 do
                 table.remove(watch_ctx.res, 1)
@@ -278,6 +286,9 @@ local function do_run_watch(premature)
 end
 
 
+-- 首次new --> _automatic_fetch -> sync_data --> init_watch_ctx --> ngx_timer_at(0, run_watch)
+-- run_watch始终是在timer中被调用
+-- run_watch会被不停调用 if not exiting() then  ngx_timer_at(0, run_watch)
 local function run_watch(premature)
     local run_watch_th, err = ngx_thread_spawn(do_run_watch, premature)
     if not run_watch_th then
@@ -295,6 +306,7 @@ local function run_watch(premature)
         return
     end
 
+    -- wait any
     local ok, err = ngx_thread_wait(run_watch_th, check_worker_th)
     if not ok then
         log.error("run_watch or check_worker thread terminates failed",
@@ -312,19 +324,20 @@ local function run_watch(premature)
     end
 end
 
-
+-- 初始化watch_ctx，只在首次new方法被调用时执行
 local function init_watch_ctx(key)
     if not watch_ctx then
         watch_ctx = {
-            idx = {},
-            res = {},
-            sema = {},
-            wait_init = {},
-            started = false,
+            idx = {},   -- 记录了key 到res index的映射， 如 "/routes" -> 1, "/upstram" -> 2； v为已经消费过的最大res_idx+1
+            res = {},   -- 主watcher获取到的结果会存放到res中,然后通知所有sub watcher去处理数据
+            sema = {},  -- 等待同步数据的sub watcher，实现 main watch通知 sub watcher
+            wait_init = {}, -- 等待main-watcher init的sub-watcher. main-watcher启动后会通知sub-watcher
+            started = false, -- main watcher是否启动
         }
         ngx_timer_at(0, run_watch)
     end
-
+    -- run_watch中会将watch_ctx.started 置为true
+    -- 如果 watch_ctx还没start, 就一直等待直到started
     if watch_ctx.started == false then
         -- wait until the main watcher is started
         local sema, err = semaphore.new()
@@ -342,7 +355,7 @@ local function init_watch_ctx(key)
     end
 end
 
-
+-- 直接读取etcd中的key. 跟后边的readdir 逻辑一样
 local function getkey(etcd_cli, key)
     if not etcd_cli then
         return nil, "not inited"
@@ -366,12 +379,13 @@ local function getkey(etcd_cli, key)
     return res
 end
 
-
+-- 直接读取etcd dir
 local function readdir(etcd_cli, key, formatter)
     if not etcd_cli then
         return nil, "not inited"
     end
 
+    --包含key下所有数据
     local res, err = etcd_cli:readdir(key)
     if not res then
         -- log.error("failed to get key from etcd: ", err)
@@ -382,6 +396,7 @@ local function readdir(etcd_cli, key, formatter)
         return nil, "failed to read etcd dir"
     end
 
+    --如果formatter不为nui, 则执行；否则将res安装v3格式进行格式化
     res, err = etcd_apisix.get_format(res, key .. '/', true, formatter)
     if not res then
         return nil, err
@@ -390,7 +405,7 @@ local function readdir(etcd_cli, key, formatter)
     return res
 end
 
-
+-- sub watch, 查看watch_ctx.res中是否有自己关心的数据。有则返回数据；无则wait
 local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
     if not watch_ctx.idx[key] then
         watch_ctx.idx[key] = 1
@@ -414,6 +429,8 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
         if tonumber(res.result.header.revision) > self.prev_index then
             local res2
             for _, evt in ipairs(res.result.events) do
+                -- is evt.kv.key start_with key
+                -- sub watch 找到自己感兴趣的updates
                 if core_str.find(evt.kv.key, key) == 1 then
                     if not res2 then
                         res2 = tablex.deepcopy(res)
@@ -454,7 +471,8 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
     end
 end
 
-
+-- sub watch指定目录
+-- return dir_res, err
 local function waitdir(self)
     local etcd_cli = self.etcd_cli
     local key = self.key
@@ -481,6 +499,12 @@ local function short_key(self, str)
 end
 
 
+-- 对从etcd拉取到的数据执行schema校验，应用到本地
+-- 1.对dir_res进行schema校验
+-- 2.dir_res中数据保存到self.values和self.values_hash中
+-- 3.self.values_hash保存的是id->self.values的array index的映射
+-- 4.执行filter(item) 各组件实际是通过filter函数回调来创建真实的route、service、upstream、plugin等待
+-- 如路由的filter apisix/router.lua:28 filter
 local function load_full_data(self, dir_res, headers)
     local err
     local changed = false
@@ -605,14 +629,17 @@ function _M.upgrade_version(self, new_ver)
     return
 end
 
-
+-- new --> _automatic_fetch -> sync_data
+-- watchdir, 如果dir有数据更新, 就应用到本地
 local function sync_data(self)
     if not self.key then
         return nil, "missing 'key' arguments"
     end
 
+    -- 初始化主watch_ctx，只在首次new方法被调用时执行
     init_watch_ctx(self.key)
 
+    -- 直接读取etcd
     if self.need_reload then
         local res, err = readdir(self.etcd_cli, self.key)
         if not res then
@@ -664,6 +691,9 @@ local function sync_data(self)
 
     local res_copy = res
     -- waitdir will return [res] even for self.single_item = true
+    --针对此次变更中所有key apply到self.values和self.values_hash中
+    --变更类型可能是Add/Update/Delete
+    --如果是delete or update,会执行事件回调fire_all_clean_handlers
     for _, res in ipairs(res_copy) do
         local key
         local data_valid = true
@@ -715,12 +745,13 @@ local function sync_data(self)
         end
 
         local pre_index = self.values_hash[key]
+        --Delete Or Update
         if pre_index then
             local pre_val = self.values[pre_index]
             if pre_val then
                 config_util.fire_all_clean_handlers(pre_val)
             end
-
+            -- 更新
             if res.value then
                 if not self.single_item then
                     res.value.id = key
@@ -730,13 +761,14 @@ local function sync_data(self)
                 res.clean_handlers = {}
                 log.info("update data by key: ", key)
 
+            --删除
             else
                 self.sync_times = self.sync_times + 1
                 self.values[pre_index] = false
                 self.values_hash[key] = nil
                 log.info("delete data by key: ", key)
             end
-
+        -- 新增
         elseif res.value then
             res.clean_handlers = {}
             insert_tab(self.values, res)
@@ -749,6 +781,8 @@ local function sync_data(self)
         end
 
         -- avoid space waste
+        --对self.values进行compact，避免过于稀疏。self.values是数组，随着数据变更，
+        --可能中间部分元素被删除形成空洞，此处进行compact
         if self.sync_times > 100 then
             local values_original = table.clone(self.values)
             table.clear(self.values)
@@ -813,14 +847,22 @@ function _M.getkey(self, key)
     return getkey(self.etcd_cli, key)
 end
 
-
+-- new(key, opts) --> if automatic then _automatic_fetch
+-- 都是在timer上下文被调用
+-- 逻辑就是不停的watch self.key 目录，有数据更新就应用到self.values和self.values_hash
 local function _automatic_fetch(premature, self)
     if premature then
         return
     end
 
+    -- https://github.com/api7/lua-resty-etcd/blob/master/health_check.md
+    -- 虽然创建了health_check貌似并没有使用
     if not (health_check.conf and health_check.conf.shm_name) then
         -- used for worker processes to synchronize configuration
+        -- In a fail_timeout, if there are max_fails consecutive failures,
+        -- the endpoint is marked as unhealthy, the unhealthy endpoint will not be choosed
+        -- to connect for a fail_timeout time in the future
+        -- retry automatically retry another endpoint when operations failed.
         local _, err = health_check.init({
             shm_name = health_check_shm_name,
             fail_timeout = self.health_check_timeout,
@@ -832,6 +874,8 @@ local function _automatic_fetch(premature, self)
         end
     end
 
+    -- 整个方法核心是while中的逻辑
+    -- 循环调用sync_data及相关错误处理和backoff delay
     local i = 0
     while not exiting() and self.running and i <= 32 do
         i = i + 1
@@ -845,17 +889,20 @@ local function _automatic_fetch(premature, self)
                 end
                 self.etcd_cli = etcd_cli
             end
-
+            -- sync_data里就是watch dir, 如果dir有数据更新, 就应用到本地，并触发相关事件更新
             local ok, err = sync_data(self)
+            -- 以下逻辑都是错误处理，根据错误原因不同，delay的时间不同
             if err then
+                -- 错误是超时导致
                 if core_str.find(err, err_etcd_grpc_engine_timeout) or
                    core_str.find(err, err_etcd_grpc_ngx_timeout)
                 then
                     err = "timeout"
                 end
-
+                -- 错误是etcd不可用导致
                 if core_str.find(err, err_etcd_unhealthy_all) then
                     local reconnected = false
+                    -- i<=32且etcd不可用 一直失败重试，中间有backoff delay
                     while err and not reconnected and i <= 32 do
                         local backoff_duration, backoff_factor, backoff_step = 1, 2, 6
                         for _ = 1, backoff_step do
@@ -881,16 +928,17 @@ local function _automatic_fetch(premature, self)
                               tostring(self))
                 end
 
-                if err ~= self.last_err then
+                if err ~= self.last_err then    --与上次遇到的错误不一样，重置错误原因
                     self.last_err = err
                     self.last_err_time = ngx_time()
-                elseif self.last_err then
+                elseif self.last_err then       --与上次遇到的错误一样
                     if ngx_time() - self.last_err_time >= 30 then
                         self.last_err = nil
                     end
                 end
 
                 -- etcd watch timeout is an expected error, so there is no need for resync_delay
+                -- 如果超时导致，立即重试；否则等会再重试
                 if err ~= "timeout" then
                     ngx_sleep(self.resync_delay + rand() * 0.5 * self.resync_delay)
                 end
@@ -944,6 +992,9 @@ end
 --        -- called once before reload for sync data from admin
 --    end,
 --})
+
+-- 这个方法一般咋洗init_worker_by_lua阶段调用。此时loaded_configuration
+-- 已经被填充
 function _M.new(key, opts)
     local local_conf, err = config_local.local_conf()
     if not local_conf then
@@ -963,7 +1014,7 @@ function _M.new(key, opts)
 
     local automatic = opts and opts.automatic
     local item_schema = opts and opts.item_schema
-    local filter_fun = opts and opts.filter
+    local filter_fun = opts and opts.filter  -- 在配置更新时被调用，Add or Delete or Update
     local timeout = opts and opts.timeout
     local single_item = opts and opts.single_item
     local checker = opts and opts.checker
@@ -971,7 +1022,7 @@ function _M.new(key, opts)
     local obj = setmetatable({
         etcd_cli = nil,
         key = key and prefix .. key,
-        automatic = automatic,
+        automatic = automatic, -- 自动保持配置最新，true 则启动 sub watcher
         item_schema = item_schema,
         checker = checker,
         sync_times = 0,
@@ -988,7 +1039,7 @@ function _M.new(key, opts)
         health_check_timeout = health_check_timeout,
         timeout = timeout,
         single_item = single_item,
-        filter = filter_fun,
+        filter = filter_fun,  -- 在配置更新时被调用，Add or Delete or Update
     }, mt)
 
     if automatic then
@@ -1005,7 +1056,7 @@ function _M.new(key, opts)
             local dir_res, headers = res.body, res.headers
             load_full_data(obj, dir_res, headers)
         end
-
+        -- 放到timer中执行
         ngx_timer_at(0, _automatic_fetch, obj)
 
     else
@@ -1017,6 +1068,7 @@ function _M.new(key, opts)
     end
 
     if key then
+        -- 全局变量 key='/routes', val = obj
         created_obj[key] = obj
     end
 
@@ -1047,7 +1099,7 @@ function _M.server_version(self)
     return res.body
 end
 
-
+-- 对res进行格式化，并将数据保存到全局loaded_configuration
 local function create_formatter(prefix)
     return function (res)
         res.body.nodes = {}
@@ -1100,7 +1152,7 @@ local function create_formatter(prefix)
     end
 end
 
-
+--init_by_lua -> apisix.http_init-->core.config.init()
 function _M.init()
     local local_conf, err = config_local.local_conf()
     if not local_conf then
@@ -1116,7 +1168,7 @@ function _M.init()
     if not etcd_cli then
         return nil, "failed to start a etcd instance: " .. err
     end
-
+    -- 读取/apisix目录下所有数据。保存到本地全局变量loaded_configuration中
     local res, err = readdir(etcd_cli, prefix, create_formatter(prefix))
     if not res then
         return nil, err
@@ -1125,7 +1177,8 @@ function _M.init()
     return true
 end
 
-
+-- 没做啥事
+-- init_worker_by_lua -> apisix.http_init_worker-->core.config.init_worker()
 function _M.init_worker()
     local local_conf, err = config_local.local_conf()
     if not local_conf then
