@@ -231,9 +231,10 @@ local function fetch_ctx()
     return ctx
 end
 
-
+-- 解析route上的域名
 local function parse_domain_in_route(route)
     local nodes = route.value.upstream.nodes
+    -- 遍历nodes, 如果某个node是域名，则将其解析为ip
     local new_nodes, err = upstream_util.parse_domain_for_nodes(nodes)
     if not new_nodes then
         return nil, err
@@ -242,7 +243,7 @@ local function parse_domain_in_route(route)
     local up_conf = route.dns_value and route.dns_value.upstream
     -- 比较new_nodes 与up_conf是否相同，比较字段 包括host", "port", "weight", "priority", "metadata"
     local ok = upstream_util.compare_upstream_node(up_conf, new_nodes)
-    if ok then
+    if ok then -- same
         return route
     end
 
@@ -535,6 +536,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         return pubsub_kafka.access(api_ctx)
     end
 
+    -- 处理服务发现； 如果node个数>1, 创建健康检查器
     local code, err = set_upstream(route, api_ctx)
     if code then
         core.log.error("failed to set upstream: ", err)
@@ -616,6 +618,8 @@ function _M.http_access_phase()
     -- record the normalized but not rewritten uri as request_uri,
     -- the original request_uri can be accessed via var.real_request_uri
     api_ctx.var.real_request_uri = api_ctx.var.request_uri
+    --is_args是nginx变量: “?” if a request line has arguments, or an empty string otherwise.
+    -- args arguments in the request line
     api_ctx.var.request_uri = api_ctx.var.uri .. api_ctx.var.is_args .. (api_ctx.var.args or "")
 
     -- 执行路由匹配
@@ -624,7 +628,10 @@ function _M.http_access_phase()
     local route = api_ctx.matched_route
     if not route then
         -- run global rule when there is no matching route
+        -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
+        -- 一个global_rule可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
         local global_rules = apisix_global_rules.global_rules()
+        -- 对于404的请求执行全局插件。如果phase_name=nil, 会执行插件的rewrite和access方法
         plugin.run_global_rules(api_ctx, global_rules, nil)
 
         core.log.info("not find any matched route")
@@ -638,6 +645,8 @@ function _M.http_access_phase()
     local enable_websocket = route.value.enable_websocket
 
     -- plugin_config_id， 合并plugin_config配置 route.plugins合并plugin_config
+    -- https://apisix.apache.org/zh/docs/apisix/terminology/plugin-config/
+    -- Plugin Config 属于一组通用插件配置的抽象
     if route.value.plugin_config_id then
         local conf = plugin_config.get(route.value.plugin_config_id)
         if not conf then
@@ -646,17 +655,17 @@ function _M.http_access_phase()
             return core.response.exit(503)
         end
 
-        route = plugin_config.merge(route, conf)
+        route = plugin_config.merge(route, conf) -- 返回的还是入参 route
     end
 
-    if route.value.service_id then
+    if route.value.service_id then               -- 如果route上关联了service_id；rote上不能内嵌service
         local service = service_fetch(route.value.service_id)
         if not service then
             core.log.error("failed to fetch service configuration by ",
                            "id: ", route.value.service_id)
             return core.response.exit(404)
         end
-        -- route.plugins合并service上配置的plugin
+        -- route.plugins合并service上配置的plugin，service上的upstream也会进行合并
         route = plugin.merge_service_route(service, route)
         api_ctx.matched_route = route
         api_ctx.conf_type = "route&service"
@@ -679,8 +688,11 @@ function _M.http_access_phase()
 
     -- run global rule
     local global_rules = apisix_global_rules.global_rules()
-    plugin.run_global_rules(api_ctx, global_rules, nil)
+    plugin.run_global_rules(api_ctx, global_rules, nil) -- 会执行插件的rewrite和access方法
 
+    --执行route上配置的script https://apisix.apache.org/zh/docs/apisix/terminology/script/
+    -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，
+    -- Route 上配置的 Plugin 将不被执行。
     if route.value.script then
         script.load(route, api_ctx)
         script.run("access", api_ctx)
@@ -694,7 +706,7 @@ function _M.http_access_phase()
             local changed
             local group_conf
 
-            if api_ctx.consumer.group_id then
+            if api_ctx.consumer.group_id then       --consumer所属的group_id, 一个consumer只能属于一个group
                 group_conf = consumer_group.get(api_ctx.consumer.group_id)
                 if not group_conf then
                     core.log.error("failed to fetch consumer group config by ",
@@ -703,6 +715,7 @@ function _M.http_access_phase()
                 end
             end
 
+            -- 合并路由与consumer、consumer_group上的插件配置， 只有consumer上没配置插件时，changed=false
             route, changed = plugin.merge_consumer_route(
                 route,
                 api_ctx.consumer,

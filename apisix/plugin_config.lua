@@ -52,7 +52,9 @@ function _M.get(id)
     return plugin_configs:get(id)
 end
 
-
+-- 路由插件和plugin_config合并
+-- plugin_config不会覆盖route_conf，只是作为route_conf的补充
+-- return route_conf
 function _M.merge(route_conf, plugin_config)
     if route_conf.prev_plugin_config_ver == plugin_config.modifiedIndex then
         return route_conf
@@ -72,6 +74,7 @@ function _M.merge(route_conf, plugin_config)
 
     route_conf.value.plugins = core.table.clone(route_conf.value.plugins)
 
+    -- 合并配置，plugin_config不会覆盖route_conf，只是作为route_conf的补充
     for name, value in pairs(plugin_config.value.plugins) do
         if not route_conf.value.plugins[name] then
             route_conf.value.plugins[name] = value

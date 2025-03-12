@@ -80,7 +80,7 @@ local function set_directly(ctx, key, ver, conf)
 end
 _M.set = set_directly
 
-
+-- 销毁健康检查器
 local function release_checker(healthcheck_parent)
     local checker = healthcheck_parent.checker
     core.log.info("try to release checker: ", tostring(checker))
@@ -94,13 +94,14 @@ local function get_healthchecker_name(value)
 end
 _M.get_healthchecker_name = get_healthchecker_name
 
-
+-- 创建健康检查器
 local function create_checker(upstream)
     if healthcheck == nil then
         healthcheck = require("resty.healthcheck")
     end
 
-    local healthcheck_parent = upstream.parent
+    local healthcheck_parent = upstream.parent  -- 可能是route 或 service
+    -- 如果已经有healthcheck，不再创建
     if healthcheck_parent.checker and healthcheck_parent.checker_upstream == upstream then
         return healthcheck_parent.checker
     end
@@ -109,11 +110,12 @@ local function create_checker(upstream)
         core.log.info("another request is creating new checker")
         return nil
     end
-    upstream.is_creating_checker = true
+    upstream.is_creating_checker = true     --标识正在创建
 
     core.log.debug("events module used by the healthcheck: ", events.events_module,
                     ", module name: ",events:get_healthcheck_events_modele())
 
+    -- https://github.com/api7/lua-resty-healthcheck apisix自己版本的healthcheck，相对于kong的实现修改了很多
     local checker, err = healthcheck.new({
         name = get_healthchecker_name(healthcheck_parent),
         shm_name = "upstream-healthcheck",
@@ -122,7 +124,7 @@ local function create_checker(upstream)
         -- events.healthcheck_events_module is set
         -- while the healthcheck object is executed in the http access phase,
         -- so it can be used here
-        events_module = events:get_healthcheck_events_modele(),
+        events_module = events:get_healthcheck_events_modele(), -- "resty.events" or "resty.worker.events"
     })
 
     if not checker then
@@ -132,6 +134,7 @@ local function create_checker(upstream)
     end
 
     if healthcheck_parent.checker then
+        -- fire= true, 取消的同时也会调用clean_handler
         local ok, err = pcall(core.config_util.cancel_clean_handler, healthcheck_parent,
                                               healthcheck_parent.checker_idx, true)
         if not ok then
@@ -156,7 +159,7 @@ local function create_checker(upstream)
     end
 
     local check_idx, err = core.config_util.add_clean_handler(healthcheck_parent, release_checker)
-    if not check_idx then
+    if not check_idx then       -- 添加失败
         upstream.is_creating_checker = nil
         checker:clear()
         checker:stop()
@@ -261,7 +264,8 @@ local function fill_node_info(up_conf, scheme, is_stream)
     return true
 end
 
-
+-- service_name 与nodes 二选一，用于服务发现； 如果node个数>1, 创建健康检查器
+--
 function _M.set_by_route(route, api_ctx)
     if api_ctx.upstream_conf then
         -- upstream_conf has been set by traffic-split plugin
@@ -362,7 +366,7 @@ function _M.set_by_route(route, api_ctx)
     end
 
     if nodes_count > 1 then
-        local checker = fetch_healthchecker(up_conf)
+        local checker = fetch_healthchecker(up_conf) -- 如果配置了健康检查，创建健康检查器
         api_ctx.up_checker = checker
     end
 

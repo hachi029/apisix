@@ -30,8 +30,9 @@ local str_byte         = string.byte
 
 
 local module_name = "balancer"
-local pickers = {}
+local pickers = {} -- 存储各种类型的负载均衡器, 如chash、roundrobin pickers[type] = require "apisix.balancer.type"
 
+--function (key, version, create_obj_fun, ...)
 local lrucache_server_picker = core.lrucache.new({
     ttl = 300, count = 256
 })
@@ -45,7 +46,8 @@ local _M = {
     name = module_name,
 }
 
-
+-- new_nodes:{}, key为priority,
+-- 主要填充new_nodes， 将node按优先级分组
 local function transform_node(new_nodes, node)
     if not new_nodes._priority_index then
         new_nodes._priority_index = {}
@@ -60,10 +62,11 @@ local function transform_node(new_nodes, node)
     return new_nodes
 end
 
-
+-- 将健康节点按node优先级分组。通过checker:get_target_status(node.host, port or node.port, host) 获取节点状态
+-- return new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
 local function fetch_health_nodes(upstream, checker)
     local nodes = upstream.nodes
-    if not checker then
+    if not checker then     --如果没有健康检查器，则认为每个node都是健康状态
         local new_nodes = core.table.new(0, #nodes)
         for _, node in ipairs(nodes) do
             new_nodes = transform_node(new_nodes, node)
@@ -77,6 +80,8 @@ local function fetch_health_nodes(upstream, checker)
     for _, node in ipairs(nodes) do
         local ok, err = checker:get_target_status(node.host, port or node.port, host)
         if ok then
+            -- ransform_node 主要做了格式转换，按node优先级分组
+            -- new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
             up_nodes = transform_node(up_nodes, node)
         elseif err then
             core.log.warn("failed to get health check target status, addr: ",
@@ -84,7 +89,7 @@ local function fetch_health_nodes(upstream, checker)
         end
     end
 
-    if core.table.nkeys(up_nodes) == 0 then
+    if core.table.nkeys(up_nodes) == 0 then     --没有健康节点，认为所有节点都是健康的
         core.log.warn("all upstream nodes is unhealthy, use default")
         for _, node in ipairs(nodes) do
             up_nodes = transform_node(up_nodes, node)
@@ -94,7 +99,7 @@ local function fetch_health_nodes(upstream, checker)
     return up_nodes
 end
 
-
+--主要是创建负载均衡器，对于priority 需要额外处理
 local function create_server_picker(upstream, checker)
     local picker = pickers[upstream.type]
     if not picker then
@@ -112,9 +117,9 @@ local function create_server_picker(upstream, checker)
             end
         end
 
-        local up_nodes = fetch_health_nodes(upstream, checker)
+        local up_nodes = fetch_health_nodes(upstream, checker)  --获取健康节点
 
-        if #up_nodes._priority_index > 1 then
+        if #up_nodes._priority_index > 1 then   --有多个优先级
             core.log.info("upstream nodes: ", core.json.delay_encode(up_nodes))
             local server_picker = priority_balancer.new(up_nodes, upstream, picker)
             server_picker.addr_to_domain = addr_to_domain
@@ -196,6 +201,7 @@ local function pick_server(route, ctx)
     core.log.info("ctx: ", core.json.delay_encode(ctx, true))
     local up_conf = ctx.upstream_conf
 
+    -- ipv6
     for _, node in ipairs(up_conf.nodes) do
         if core.utils.parse_ipv6(node.host) and str_byte(node.host, 1) ~= str_byte("[") then
             node.host = '[' .. node.host .. ']'
@@ -203,7 +209,7 @@ local function pick_server(route, ctx)
     end
 
     local nodes_count = #up_conf.nodes
-    if nodes_count == 1 then
+    if nodes_count == 1 then        -- 只有一个node, 直接取唯一节点
         local node = up_conf.nodes[1]
         ctx.balancer_ip = node.host
         ctx.balancer_port = node.port
@@ -216,7 +222,7 @@ local function pick_server(route, ctx)
     local checker = ctx.up_checker
 
     ctx.balancer_try_count = (ctx.balancer_try_count or 0) + 1
-    if ctx.balancer_try_count > 1 then
+    if ctx.balancer_try_count > 1 then      --重试场景，处理被动健康检查
         if ctx.server_picker and ctx.server_picker.after_balance then
             ctx.server_picker.after_balance(ctx, true)
         end
@@ -238,12 +244,12 @@ local function pick_server(route, ctx)
     end
 
     if checker then
-        version = version .. "#" .. checker.status_ver
+        version = version .. "#" .. checker.status_ver    --每当有节点状态发生变化时status_ver会加1
     end
 
     -- the same picker will be used in the whole request, especially during the retry
     local server_picker = ctx.server_picker
-    if not server_picker then
+    if not server_picker then       -- key是up_conf.parent.value.id
         server_picker = lrucache_server_picker(key, version,
                                                create_server_picker, up_conf, checker)
     end
