@@ -209,7 +209,7 @@ local scheme_to_port = {
 
 _M.scheme_to_port = scheme_to_port
 
-
+-- 主要是如果node没有配置port, 则根据scheme填充默认node的端口: 80/443
 local function fill_node_info(up_conf, scheme, is_stream)
     local nodes = up_conf.nodes
     if up_conf.nodes_ref == nodes then
@@ -273,7 +273,7 @@ function _M.set_by_route(route, api_ctx)
     end
 
     local up_conf = api_ctx.matched_upstream
-    if not up_conf then
+    if not up_conf then     -- upstream为nil, 返回503
         return 503, "missing upstream configuration in Route or Service"
     end
     -- core.log.info("up_conf: ", core.json.delay_encode(up_conf, true))
@@ -287,19 +287,21 @@ function _M.set_by_route(route, api_ctx)
             return 503, "discovery server need appoint"
         end
 
-        local dis = discovery[up_conf.discovery_type]
+        local dis = discovery[up_conf.discovery_type]   -- 具体的discovery类型
         if not dis then
             local err = "discovery " .. up_conf.discovery_type .. " is uninitialized"
             return 503, err
         end
 
+        -- 从discovery获取service_name对应的节点列表
         local new_nodes, err = dis.nodes(up_conf.service_name, up_conf.discovery_args)
         if not new_nodes then
             return HTTP_CODE_UPSTREAM_UNAVAILABLE, "no valid upstream node: " .. (err or "nil")
         end
 
+        -- 节点是否有变更
         local same = upstream_util.compare_upstream_node(up_conf, new_nodes)
-        if not same then
+        if not same then  -- 发生了变更，更新为新的nodes
             local pass, err = core.schema.check(core.schema.discovery_nodes, new_nodes)
             if not pass then
                 return HTTP_CODE_UPSTREAM_UNAVAILABLE, "invalid nodes format: " .. err
@@ -337,6 +339,7 @@ function _M.set_by_route(route, api_ctx)
 
     -- subsystem非http代理
     if not is_http then
+        -- 根据scheme填充默认node的端口
         local ok, err = fill_node_info(up_conf, nil, true)
         if not ok then
             return 503, err
@@ -358,18 +361,21 @@ function _M.set_by_route(route, api_ctx)
         return
     end
 
+    -- 设置 ctx.upstream_scheme http or https
     set_upstream_scheme(api_ctx, up_conf)
 
+    -- 根据scheme填充默认node的端口
     local ok, err = fill_node_info(up_conf, api_ctx.upstream_scheme, false)
     if not ok then
         return 503, err
     end
 
     if nodes_count > 1 then
-        local checker = fetch_healthchecker(up_conf) -- 如果配置了健康检查，创建健康检查器
+        local checker = fetch_healthchecker(up_conf) -- 如果upstream配置了健康检查，创建健康检查器
         api_ctx.up_checker = checker
     end
 
+    -- ssl相关
     local scheme = up_conf.scheme
     if (scheme == "https" or scheme == "grpcs") and up_conf.tls then
 
@@ -384,6 +390,7 @@ function _M.set_by_route(route, api_ctx)
 
         -- the sni here is just for logging
         local sni = api_ctx.var.upstream_host
+        -- 根据 sni 查找证书
         local cert, err = apisix_ssl.fetch_cert(sni, client_cert)
         if not ok then
             return 503, err

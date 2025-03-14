@@ -250,6 +250,7 @@ local function parse_domain_in_route(route)
     -- don't modify the modifiedIndex to avoid plugin cache miss because of DNS resolve result
     -- has changed
 
+    -- 不一样，更新new_nodes
     route.dns_value = core.table.deepcopy(route.value, { shallows = { "self.upstream.parent"}})
     route.dns_value.upstream.nodes = new_nodes
     core.log.info("parse route which contain domain: ",
@@ -437,7 +438,7 @@ local function normalize_uri_like_servlet(uri)
     return core.table.concat(segs, '/')
 end
 
-
+-- 同时执行全局插件和路由插件
 local function common_phase(phase_name)
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -522,6 +523,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         api_ctx.upstream_ssl = upstream_ssl
     end
 
+    -- websocket相关头部
     if enable_websocket then
         api_ctx.var.upstream_upgrade    = api_ctx.var.http_upgrade
         api_ctx.var.upstream_connection = api_ctx.var.http_connection
@@ -543,6 +545,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         core.response.exit(code)
     end
 
+    -- load_balancer 是一个load_balancer管理器
     local server, err = load_balancer.pick_server(route, api_ctx)
     if not server then
         core.log.error("failed to pick server: ", err)
@@ -552,9 +555,11 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
     api_ctx.picked_server = server
 
     -- 设置往upstream转发的请求头
+    -- x_forwarded_proto x_forwarded_host x_forwarded_port
     set_upstream_headers(api_ctx, server)
 
     -- run the before_proxy method in access phase first to avoid always reinit request
+    -- common_phase: 同时执行 plugin和global_rules
     common_phase("before_proxy")
 
     local up_scheme = api_ctx.upstream_scheme
@@ -702,7 +707,7 @@ function _M.http_access_phase()
         api_ctx.plugins = plugins
 
         plugin.run_plugin("rewrite", plugins, api_ctx)
-        if api_ctx.consumer then
+        if api_ctx.consumer then        --如果启用了认证插件
             local changed
             local group_conf
 
@@ -766,7 +771,7 @@ function _M.grpc_access_phase()
     end
 end
 
-
+-- 设置 X-APISIX-Upstream-Status 响应头
 local function set_resp_upstream_status(up_status)
     local_conf = core.config.local_conf()
 
@@ -797,10 +802,10 @@ function _M.http_header_filter_phase()
 
     local up_status = get_var("upstream_status")
     if up_status then
-        set_resp_upstream_status(up_status)
+        set_resp_upstream_status(up_status)     -- 设置 X-APISIX-Upstream-Status 响应头
     end
 
-    common_phase("header_filter")
+    common_phase("header_filter")   -- 包括global_rules 和 路由上的plugins
 
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -808,7 +813,7 @@ function _M.http_header_filter_phase()
     end
 
     local debug_headers = api_ctx.debug_headers
-    if debug_headers then
+    if debug_headers then   -- 设置到 Apisix-Plugins响应头
         local deduplicate = core.table.new(core.table.nkeys(debug_headers), 0)
         for k, v in pairs(debug_headers) do
             core.table.insert(deduplicate, k)
@@ -817,22 +822,22 @@ function _M.http_header_filter_phase()
     end
 end
 
-
+-- 依次执行 body_filter和delayed_body_filter阶段
 function _M.http_body_filter_phase()
     common_phase("body_filter")
     common_phase("delayed_body_filter")
 end
 
-
+-- 主要是根据上游返回的status和upstream被动健康检查配置调用checker的report_http_status
 local function healthcheck_passive(api_ctx)
     local checker = api_ctx.up_checker
-    if not checker then
+    if not checker then     --如果未配置健康检查，直接返回
         return
     end
 
     local up_conf = api_ctx.upstream_conf
     local passive = up_conf.checks.passive
-    if not passive then
+    if not passive then     --如果未开启被动健康检查，直接返回
         return
     end
 
@@ -847,9 +852,9 @@ local function healthcheck_passive(api_ctx)
                           passive.healthy.http_statuses
     core.log.info("passive.healthy.http_statuses: ",
                   core.json.delay_encode(http_statuses))
-    if http_statuses then
+    if http_statuses then       -- healthy
         for i, status in ipairs(http_statuses) do
-            if resp_status == status then
+            if resp_status == status then   -- 如果上游返回的status在passive.healthy.http_statuses中
                 checker:report_http_status(api_ctx.balancer_ip,
                                            port or api_ctx.balancer_port,
                                            host,
@@ -862,12 +867,12 @@ local function healthcheck_passive(api_ctx)
                     passive.unhealthy.http_statuses
     core.log.info("passive.unhealthy.http_statuses: ",
                   core.json.delay_encode(http_statuses))
-    if not http_statuses then
+    if not http_statuses then       -- unhealthy
         return
     end
 
     for i, status in ipairs(http_statuses) do
-        if resp_status == status then
+        if resp_status == status then       -- 如果上游返回的status在passive.unhealthy.http_statuses中
             checker:report_http_status(api_ctx.balancer_ip,
                                        port or api_ctx.balancer_port,
                                        host,
@@ -883,15 +888,16 @@ function _M.http_log_phase()
         return
     end
 
+    -- report_http_status, 实现被动健康检查
     healthcheck_passive(api_ctx)
 
     if api_ctx.server_picker and api_ctx.server_picker.after_balance then
-        api_ctx.server_picker.after_balance(api_ctx, false)
+        api_ctx.server_picker.after_balance(api_ctx, false)     -- 一些资源释放等
     end
 
-    core.ctx.release_vars(api_ctx)
+    core.ctx.release_vars(api_ctx)      -- 回收api_ctx
     if api_ctx.plugins then
-        core.tablepool.release("plugins", api_ctx.plugins)
+        core.tablepool.release("plugins", api_ctx.plugins)   -- 回收 plugins
     end
 
     if api_ctx.curr_req_matched then
@@ -901,14 +907,16 @@ function _M.http_log_phase()
     core.tablepool.release("api_ctx", api_ctx)
 end
 
-
+-- balance_by_lua
+-- 在失败重试时，会被多次执行
+-- https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream
 function _M.http_balancer_phase()
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
         core.log.error("invalid api_ctx")
         return core.response.exit(500)
     end
-
+    --  load_balancer = require("apisix.balancer")
     load_balancer.run(api_ctx.matched_route, api_ctx, common_phase)
 end
 

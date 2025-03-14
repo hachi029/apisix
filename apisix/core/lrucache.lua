@@ -18,7 +18,7 @@
 --- LRU Caching Implementation.
 --
 -- @module core.lrucache
-
+-- https://github.com/openresty/lua-resty-lrucache
 local lru_new = require("resty.lrucache").new
 local resty_lock = require("resty.lock")
 local log = require("apisix.core.log")
@@ -48,10 +48,15 @@ local PLUGIN_TTL         = 5 * 60           -- 5 min
 local PLUGIN_ITEMS_COUNT = 8
 local global_lru_fun
 
-
+-- lru_obj: resty.lrucache(item_count)
+-- invalid_stale: 是否允许返回过期的对象，如果允许，过期的对象会被重新设置ttl
+-- item_ttl: 对象的ttl
+-- item_release: item从缓存中释放的回调
+-- key: lru key,
+-- version: obj附加字段version. 如果指定了version, 只有version一致，才会返回key对应的对象
 local function fetch_valid_cache(lru_obj, invalid_stale, item_ttl,
                                  item_release, key, version)
-    local obj, stale_obj = lru_obj:get(key)
+    local obj, stale_obj = lru_obj:get(key)     -- stale_obj, 过期的obj
     if obj and obj.ver == version then
         return obj
     end

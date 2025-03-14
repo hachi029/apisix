@@ -1216,14 +1216,14 @@ end
 -- plugins 待执行的插件，已经排好序了
 -- return api_ctx, plugin_run , 第二个参数标识是否有插件被执行了
 function _M.run_plugin(phase, plugins, api_ctx)
-    local plugin_run = false
+    local plugin_run = false    -- 标识是否有插件被执行了
     api_ctx = api_ctx or ngx.ctx.api_ctx
     if not api_ctx then
         return
     end
 
     plugins = plugins or api_ctx.plugins
-    if not plugins or #plugins == 0 then
+    if not plugins or #plugins == 0 then  --没有插件
         return api_ctx
     end
 
@@ -1233,7 +1233,7 @@ function _M.run_plugin(phase, plugins, api_ctx)
         and phase ~= "body_filter"
         and phase ~= "delayed_body_filter"
     then
-        for i = 1, #plugins, 2 do
+        for i = 1, #plugins, 2 do   --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
             local phase_func
             -- 在rewrite_in_consumer阶段，会跳过auth类型的插件，因为已经执行过了。参考本文件_M.filter方法
             if phase == "rewrite_in_consumer" then
@@ -1291,6 +1291,7 @@ function _M.run_plugin(phase, plugins, api_ctx)
         return api_ctx, plugin_run
     end
 
+    -- 以下是执行upstream返回请求后的相关逻辑
     for i = 1, #plugins, 2 do
         local phase_func = plugins[i][phase]
         local conf = plugins[i + 1]

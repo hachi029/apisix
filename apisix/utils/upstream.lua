@@ -28,7 +28,8 @@ local function sort_by_key_host(a, b)
     return a.host < b.host
 end
 
-
+-- 比较之前的upstream nodes与本次新获取的nodes是否相同
+-- 比较属性包括 "host", "port", "weight", "priority", "metadata"
 local function compare_upstream_node(up_conf, new_t)
     if up_conf == nil then
         return false
