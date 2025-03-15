@@ -93,6 +93,8 @@ _M.gen_uuid_v4 = uuid.generate_v4
 
 
 --- This will autogenerate the admin key if it's passed as an empty string in the configuration.
+--- 如果未设置admin_key， 会自动生成一个
+-- return admin_key,是否自动生成了admin_key
 local function autogenerate_admin_key(default_conf)
     local changed = false
    -- Check if deployment.role is either traditional or control_plane
@@ -121,8 +123,9 @@ end
 function _M.init()
     local local_conf = fetch_local_conf()
 
+    -- 如果未设置admin_key， 会自动生成一个
     local local_conf, changed = autogenerate_admin_key(local_conf)
-    if changed then
+    if changed then --自动生成了admin_key
         local yaml_conf = generate_yaml(local_conf)
         local local_conf_path = profile:yaml_path("config")
         local ok, err = write_file(local_conf_path, yaml_conf)
@@ -132,6 +135,7 @@ function _M.init()
         end
     end
 
+    -- 自动生成 conf/apisix.uid
     --allow user to specify a meaningful id as apisix instance id
     local uid_file_path = prefix .. "/conf/apisix.uid"
     apisix_uid = read_file(uid_file_path)

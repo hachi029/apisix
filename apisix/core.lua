@@ -31,7 +31,7 @@ config.type = config_provider
 return {
     version     = require("apisix.core.version"),
     log         = log,
-    config      = config,
+    config      = config,      -- 本地配置conf/config.yaml并与默认配置apisix/cli/config.lua合并的结果
     config_util = require("apisix.core.config_util"),
     sleep       = utils.sleep,
     json        = require("apisix.core.json"),

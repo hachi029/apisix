@@ -18,15 +18,16 @@ local require = require
 local core = require("apisix.core")
 local base_router = require("apisix.http.route")
 local get_services = require("apisix.http.service").services
-local cached_router_version
-local cached_service_version
+local cached_router_version     -- 存放etcd /routes配置版本，也就是路由版本。
+local cached_service_version    -- 存放etcd /services配置版本，也就是版本。
 
 
 local _M = {version = 0.2}
 
 
-    local uri_routes = {}
-    local uri_router
+    local uri_routes = {}  --https://github.com/api7/lua-resty-radixtree#new routes参数
+    local uri_router  -- lua-resty-radixtree#new 创建出来的router, 真正来执行路由匹配的对象
+-- 在首次进行路由匹配时，或发现配置版本发生了变更后，重新创建router
 function _M.match(api_ctx)
     local user_routes = _M.user_routes
     local _, service_version = get_services()

@@ -102,14 +102,14 @@ return function (apisix_home, pkg_cpath_org, pkg_path_org)
     local min_etcd_version = "3.4.0"
 
     return {
-        apisix_home = apisix_home,
-        is_root_path = is_root_path,
-        openresty_args = openresty_args,
-        openresty_info = or_info,
-        use_apisix_base = use_apisix_base,
-        pkg_cpath_org = pkg_cpath_org,
-        pkg_path_org = pkg_path_org,
-        min_etcd_version = min_etcd_version,
-        ulimit = ulimit,
+        apisix_home = apisix_home,      -- 安装目录
+        is_root_path = is_root_path,    -- 当前目录是否是/root
+        openresty_args = openresty_args,--  (-p .. -c ..)
+        openresty_info = or_info,   -- openresty -V
+        use_apisix_base = use_apisix_base, -- 是否使用了 apisix-nginx-module
+        pkg_cpath_org = pkg_cpath_org, -- cpath
+        pkg_path_org = pkg_path_org,   -- lua-path
+        min_etcd_version = min_etcd_version, -- 3.4.0
+        ulimit = ulimit,    -- ulimit -n
     }
 end

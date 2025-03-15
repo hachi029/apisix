@@ -28,7 +28,7 @@ local pairs             = pairs
 
 local _M = {}
 
-
+-- v3_adapter,支持新版本功能 https://apisix.apache.org/zh/docs/apisix/admin-api/#v3-new-function
 local admin_api_version
 local function enable_v3()
     if admin_api_version then
@@ -83,7 +83,7 @@ local function sort(l, r)
     return l.createdIndex < r.createdIndex
 end
 
-
+-- 分页 args.page_size、args.page， 根据创建时间排序
 local function pagination(body, args)
     args.page = tonumber(args.page)
     args.page_size = tonumber(args.page_size)
@@ -103,7 +103,7 @@ local function pagination(body, args)
     local list = body.list
 
     -- sort nodes by there createdIndex
-    table.sort(list, sort)
+    table.sort(list, sort)      -- 根据创建时间排序
 
     local to = args.page * args.page_size
     local from =  to - args.page_size + 1
@@ -119,7 +119,7 @@ local function pagination(body, args)
     body.list = res
 end
 
-
+--查询条件过滤， 支持label、name、uri正则匹配过滤
 local function filter(body, args)
     if not args.name and not args.label and not args.uri then
         return
@@ -174,7 +174,9 @@ local function filter(body, args)
     end
 end
 
-
+-- 支持查询条件（label、name、uri）
+-- 支持分页
+-- https://apisix.apache.org/zh/docs/apisix/admin-api/#v3-new-function
 function _M.filter(body)
     if not enable_v3() then
         return body
@@ -194,12 +196,12 @@ function _M.filter(body)
 
     -- filter and paging logic for list query only
     if processed_body.list then
-        filter(processed_body, args)
+        filter(processed_body, args)    --查询条件过滤， 支持label、name、uri正则匹配过滤
 
         -- calculate the total amount of filtered data
         processed_body.total = processed_body.list and #processed_body.list or 0
 
-        pagination(processed_body, args)
+        pagination(processed_body, args)        --分页，根据创建时间排序
 
         -- remove the count field returned by etcd
         -- we don't need a field that reflects the length of the currently returned data,

@@ -23,7 +23,7 @@ local util = require("apisix.cli.util")
 
 local _M = {
     version = 0.1,
-    profile = os.getenv("APISIX_PROFILE") or "",
+    profile = os.getenv("APISIX_PROFILE") or "",        --读取当前的profile
     apisix_home = (ngx and ngx.config.prefix()) or ""
 }
 

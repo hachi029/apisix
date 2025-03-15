@@ -52,7 +52,10 @@ function _M.get(id)
     return plugin_configs:get(id)
 end
 
-
+-- 路由插件和plugin_config合并
+-- plugin_config不会覆盖route_conf，只是作为route_conf的补充
+-- Plugin Config 属于一组通用插件配置的抽象, 包含多个插件配置 {"plugins":{"key-auth":{...}, "rate-limit":{...}}}
+-- return route_conf
 function _M.merge(route_conf, plugin_config)
     if route_conf.prev_plugin_config_ver == plugin_config.modifiedIndex then
         return route_conf
@@ -72,8 +75,9 @@ function _M.merge(route_conf, plugin_config)
 
     route_conf.value.plugins = core.table.clone(route_conf.value.plugins)
 
+    -- 合并配置，plugin_config不会覆盖route_conf，只是作为route_conf的补充
     for name, value in pairs(plugin_config.value.plugins) do
-        if not route_conf.value.plugins[name] then
+        if not route_conf.value.plugins[name] then  -- 如果route上没配置这个插件，则合并到route上
             route_conf.value.plugins[name] = value
         end
     end
