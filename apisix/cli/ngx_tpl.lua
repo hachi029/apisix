@@ -14,7 +14,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
-
+-- 用于生成nginx.conf的模版
 return [=[
 # Configuration File - Nginx Server Configs
 # This is a read-only file, do not try to modify it.

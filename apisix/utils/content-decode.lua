@@ -21,7 +21,7 @@ local is_br_libs_loaded, brotli = pcall(require, "brotli")
 local content_decode_funcs = {}
 local _M = {}
 
-
+-- 解压缩gzip/br类型的响应体
 local function inflate_gzip(data)
     local inputs = str_buffer.new():set(data)
     local outputs = str_buffer.new()

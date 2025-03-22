@@ -33,7 +33,8 @@ local schema = {
     },
     required = {"headers"},
 }
-
+--https://apisix.apache.org/zh/docs/apisix/plugins/attach-consumer-label/
+-- 除了X-Consumer-Username、X-Credential-Identifier外将自定义的消费者相关标签也附加到上游请求
 local _M = {
     version = 0.1,
     priority = 2399,
@@ -47,18 +48,18 @@ end
 
 function _M.before_proxy(conf, ctx)
     -- check if the consumer is exists in the context
-    if not ctx.consumer then
+    if not ctx.consumer then        --未经过认证
         return
     end
 
-    local labels = ctx.consumer.labels
+    local labels = ctx.consumer.labels      --自定义标签
     core.log.info("consumer username: ", ctx.consumer.username, " labels: ",
             core.json.delay_encode(labels))
     if not labels then
         return
     end
 
-    for header, label_key in pairs(conf.headers) do
+    for header, label_key in pairs(conf.headers) do     --设置自定义标签
         -- remove leading $ character
         local label_value = labels[label_key:sub(2)]
         core.request.set_header(ctx, header, label_value)

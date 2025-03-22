@@ -83,9 +83,9 @@ local function check_conf(id, conf, need_id, schema)
     return true
 end
 
-
+-- 删除时校验是否有route引用此service
 local function delete_checker(id)
-    local routes, routes_ver = get_routes()
+    local routes, routes_ver = get_routes()     --获取所有的route,遍历校验
     core.log.info("routes: ", core.json.delay_encode(routes, true))
     core.log.info("routes_ver: ", routes_ver)
     if routes_ver and routes then

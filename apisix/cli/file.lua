@@ -223,7 +223,7 @@ local function merge_conf(base, new_tab, ppath)
     return base
 end
 
-
+-- 读取conf/conf.yaml 并于默认配置apisix.cli.config合并
 function _M.read_yaml_conf(apisix_home)
     if apisix_home then
         profile.apisix_home = apisix_home .. "/"

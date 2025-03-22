@@ -20,11 +20,29 @@ local timer_at = ngx.timer.at
 local pairs = pairs
 local setmetatable = setmetatable
 
+-- batch-processor-manager 批处理器管理器，管理多个批处理器。
+-- https://apisix.apache.org/zh/docs/apisix/batch-processor/
+-- 使用方法：
+-- batch_processor_manager =  new("http-logger")
+-- if batch_processor_manager:add_entry(conf, entry) then   直接调用，添加entry， 如果返回false，表示还没创建
+--        return
+-- end
+-- batch_processor_manager:add_entry_to_new_processor(conf, entry, ctx, func)   -- 新建，fun表示batch处理函数
 
 local _M = {}
 local mt = { __index = _M }
 
-
+-- config = {
+--        name = conf.name,     -- 只是一个标识
+--        batch_max_size = conf.batch_max_size,       --最大批次大小
+--        inactive_timeout = conf.inactive_timeout,   --最新元素在管道里的最长时间
+--        buffer_duration = conf.buffer_duration,     --最早元素在管道里的最长时间
+--        max_retry_count = conf.max_retry_count,     --失败重试次数。
+--        retry_delay = conf.retry_delay,             --每次失败后，延迟几秒后再次执行
+--        func = conf.func                            --批处理器，返回 ok, err, first_fail_idx
+--    }
+-- -- func 执行时机：1）元素个数达到batch_max_size；2）now() - first_element_added_time > buffer_duration
+-- -- 3) now() - last_element_added_time > inactive_timeout
 function _M.new(name)
     return setmetatable({
         stale_timer_running = false,
@@ -33,7 +51,9 @@ function _M.new(name)
     }, mt)
 end
 
-
+-- 将batch_processor的scheme附加到入参schema上。
+-- 比如http-logger的配置scheme将自动包含batch_processor的schema
+-- 这样使用批处理器的插件不用重复配置批处理器相关的schema了
 function _M:wrap_schema(schema)
     local bp_schema = core.table.deepcopy(batch_processor.schema)
     local properties = schema.properties
@@ -50,6 +70,7 @@ end
 
 
 -- remove stale objects from the memory after timer expires
+-- 定期检查batch-processor, 如果batch-processor里没有entry，则释放掉，在下次addEntry时会重新创建。即清理闲置的batch-processor
 local function remove_stale_objects(premature, self)
     if premature then
         return
@@ -71,6 +92,7 @@ local check_stale
 do
     local interval = 1800
 
+    -- 检查闲置的batch_processor，如有，清理之
     function check_stale(self)
         if not self.stale_timer_running then
             -- run the timer every 30 mins if any log is present
@@ -86,7 +108,7 @@ end
 
 
 function _M:add_entry(conf, entry)
-    check_stale(self)
+    check_stale(self)   --每30分钟检查一次stale的batch-processor, 如果batch-processor里没有entry，则释放掉
 
     local log_buffer = self.buffers[conf]
     if not log_buffer then
@@ -97,14 +119,14 @@ function _M:add_entry(conf, entry)
     return true
 end
 
-
+-- 当add_entry返回false时调用，会创建新的log_buffer
 function _M:add_entry_to_new_processor(conf, entry, ctx, func)
-    check_stale(self)
+    check_stale(self)  --每30分钟检查一次stale的batch-processor, 如果batch-processor里没有entry，则释放掉
 
     local config = {
         name = conf.name,
-        batch_max_size = conf.batch_max_size,
-        max_retry_count = conf.max_retry_count,
+        batch_max_size = conf.batch_max_size,   --
+        max_retry_count = conf.max_retry_count, --
         retry_delay = conf.retry_delay,
         buffer_duration = conf.buffer_duration,
         inactive_timeout = conf.inactive_timeout,

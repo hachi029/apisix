@@ -30,11 +30,14 @@ local str_byte         = string.byte
 
 
 local module_name = "balancer"
-local pickers = {}
+local pickers = {} -- 存储各种类型的负载均衡器, 如chash、roundrobin pickers[type] = require "apisix.balancer.type"
 
+--function (key, version, create_obj_fun, ...)
+-- 负载均衡器的缓存，key是up_conf.parent.value.id
 local lrucache_server_picker = core.lrucache.new({
     ttl = 300, count = 256
 })
+-- 'addr' into the host and the port parts 的缓存
 local lrucache_addr = core.lrucache.new({
     ttl = 300, count = 1024 * 4
 })
@@ -45,7 +48,8 @@ local _M = {
     name = module_name,
 }
 
-
+-- new_nodes:{}, key为priority,
+-- 主要填充new_nodes， 将node按优先级分组
 local function transform_node(new_nodes, node)
     if not new_nodes._priority_index then
         new_nodes._priority_index = {}
@@ -60,10 +64,11 @@ local function transform_node(new_nodes, node)
     return new_nodes
 end
 
-
+-- 将健康节点按node优先级分组。通过checker:get_target_status(node.host, port or node.port, host) 获取节点状态
+-- return new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
 local function fetch_health_nodes(upstream, checker)
     local nodes = upstream.nodes
-    if not checker then
+    if not checker then     --如果没有健康检查器，则认为每个node都是健康状态
         local new_nodes = core.table.new(0, #nodes)
         for _, node in ipairs(nodes) do
             new_nodes = transform_node(new_nodes, node)
@@ -77,6 +82,8 @@ local function fetch_health_nodes(upstream, checker)
     for _, node in ipairs(nodes) do
         local ok, err = checker:get_target_status(node.host, port or node.port, host)
         if ok then
+            -- ransform_node 主要做了格式转换，按node优先级分组
+            -- new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
             up_nodes = transform_node(up_nodes, node)
         elseif err then
             core.log.warn("failed to get health check target status, addr: ",
@@ -84,7 +91,7 @@ local function fetch_health_nodes(upstream, checker)
         end
     end
 
-    if core.table.nkeys(up_nodes) == 0 then
+    if core.table.nkeys(up_nodes) == 0 then     --没有健康节点，认为所有节点都是健康的
         core.log.warn("all upstream nodes is unhealthy, use default")
         for _, node in ipairs(nodes) do
             up_nodes = transform_node(up_nodes, node)
@@ -94,7 +101,7 @@ local function fetch_health_nodes(upstream, checker)
     return up_nodes
 end
 
-
+--主要是使用健康的节点创建负载均衡器，如果设置了node.priority创建priority类型的balancer
 local function create_server_picker(upstream, checker)
     local picker = pickers[upstream.type]
     if not picker then
@@ -112,9 +119,10 @@ local function create_server_picker(upstream, checker)
             end
         end
 
-        local up_nodes = fetch_health_nodes(upstream, checker)
+        -- new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
+        local up_nodes = fetch_health_nodes(upstream, checker)  --获取健康节点
 
-        if #up_nodes._priority_index > 1 then
+        if #up_nodes._priority_index > 1 then   --有多个优先级，则创建priority_balancer
             core.log.info("upstream nodes: ", core.json.delay_encode(up_nodes))
             local server_picker = priority_balancer.new(up_nodes, upstream, picker)
             server_picker.addr_to_domain = addr_to_domain
@@ -137,7 +145,8 @@ local function parse_addr(addr)
     return {host = host, port = port}, err
 end
 
-
+-- 主要是与upstream交互的超时时间、重试等相关参数
+-- ngx.balancer.set_timeouts...
 -- set_balancer_opts will be called in balancer phase and before any tries
 local function set_balancer_opts(route, ctx)
     local up_conf = ctx.upstream_conf
@@ -177,7 +186,7 @@ local function set_balancer_opts(route, ctx)
     end
 end
 
-
+-- 返回host:port格式， 如果host中不包含port, 根据upstream_scheme使用一个默认的port
 local function parse_server_for_upstream_host(picked_server, upstream_scheme)
     local standard_port = apisix_upstream.scheme_to_port[upstream_scheme]
     local host = picked_server.domain or picked_server.host
@@ -196,6 +205,7 @@ local function pick_server(route, ctx)
     core.log.info("ctx: ", core.json.delay_encode(ctx, true))
     local up_conf = ctx.upstream_conf
 
+    -- ipv6, 如果是ipv6地址，设置host为 [ipv6] 格式
     for _, node in ipairs(up_conf.nodes) do
         if core.utils.parse_ipv6(node.host) and str_byte(node.host, 1) ~= str_byte("[") then
             node.host = '[' .. node.host .. ']'
@@ -203,7 +213,7 @@ local function pick_server(route, ctx)
     end
 
     local nodes_count = #up_conf.nodes
-    if nodes_count == 1 then
+    if nodes_count == 1 then        -- 只有一个node, 直接取唯一节点
         local node = up_conf.nodes[1]
         ctx.balancer_ip = node.host
         ctx.balancer_port = node.port
@@ -215,8 +225,9 @@ local function pick_server(route, ctx)
     local key = ctx.upstream_key
     local checker = ctx.up_checker
 
-    ctx.balancer_try_count = (ctx.balancer_try_count or 0) + 1
-    if ctx.balancer_try_count > 1 then
+    ctx.balancer_try_count = (ctx.balancer_try_count or 0) + 1  --记录重试次数
+    -- 重试场景，被动健康检查相关逻辑
+    if ctx.balancer_try_count > 1 then      --重试场景，处理被动健康检查。正常流程是在log_by_lua阶段处理的
         if ctx.server_picker and ctx.server_picker.after_balance then
             ctx.server_picker.after_balance(ctx, true)
         end
@@ -238,12 +249,12 @@ local function pick_server(route, ctx)
     end
 
     if checker then
-        version = version .. "#" .. checker.status_ver
+        version = version .. "#" .. checker.status_ver    --每当有节点状态发生变化时status_ver会加1(checker里的逻辑)
     end
 
     -- the same picker will be used in the whole request, especially during the retry
     local server_picker = ctx.server_picker
-    if not server_picker then
+    if not server_picker then       -- key是up_conf.parent.value.id. version如果与上次不一致，会创建新的负载均衡器
         server_picker = lrucache_server_picker(key, version,
                                                create_server_picker, up_conf, checker)
     end
@@ -258,7 +269,7 @@ local function pick_server(route, ctx)
     end
     ctx.balancer_server = server
 
-    local domain = server_picker.addr_to_domain[server]
+    local domain = server_picker.addr_to_domain[server] -- ip到域名的映射
     local res, err = lrucache_addr(server, nil, parse_addr, server)
     if err then
         core.log.error("failed to parse server addr: ", server, " err: ", err)
@@ -269,7 +280,7 @@ local function pick_server(route, ctx)
     ctx.balancer_ip = res.host
     ctx.balancer_port = res.port
     ctx.server_picker = server_picker
-    res.upstream_host = parse_server_for_upstream_host(res, ctx.upstream_scheme)
+    res.upstream_host = parse_server_for_upstream_host(res, ctx.upstream_scheme)    --没做啥事
 
     return res
 end
@@ -284,13 +295,14 @@ do
     local pool_opt = {}
     local default_keepalive_pool
 
+    -- 主要调用 ngx.balancer.set_current_peer
     function set_current_peer(server, ctx)
         local up_conf = ctx.upstream_conf
         local keepalive_pool = up_conf.keepalive_pool
 
         if enable_keepalive then
-            if not keepalive_pool then
-                if not default_keepalive_pool then
+            if not keepalive_pool then -- 关键字段size、idle_timeout、requests
+                if not default_keepalive_pool then      -- 首次执行，会初始化默认的keepalive_pool配置
                     local local_conf = core.config.local_conf()
                     local up_keepalive_conf =
                         core.table.try_read_attr(local_conf, "nginx_config",
@@ -325,6 +337,7 @@ do
             end
             pool_opt.pool = pool
 
+            --ngx.balancer.set_current_peer
             local ok, err = balancer.set_current_peer(server.host, server.port,
                                                       pool_opt)
             if not ok then
@@ -338,26 +351,30 @@ do
     end
 end
 
-
+-- init.lua http_balancer_phase -> this.run
+-- route: matched route
+-- plugin_funcs: 为init.lua中的common_phase， 用来执行global_rules和plugins的before_proxy方法
+-- 这个方法如果存在失败重试，会被多次执行
 function _M.run(route, ctx, plugin_funcs)
     local server, err
 
-    if ctx.picked_server then
+    if ctx.picked_server then       -- 首次执行
         -- use the server picked in the access phase
         server = ctx.picked_server
         ctx.picked_server = nil
-
+        --ngx.balancer.set_timeouts, 设置超时、重试等相关参数
+        -- 首次执行时会设置 proxy_retry_deadline = ngx_now() + up_conf.retry_timeout
         set_balancer_opts(route, ctx)
 
-    else
-        if ctx.proxy_retry_deadline and ctx.proxy_retry_deadline < ngx_now() then
+    else    --重试
+        if ctx.proxy_retry_deadline and ctx.proxy_retry_deadline < ngx_now() then -- proxy_retry_deadline超时
             -- retry count is (try count - 1)
             core.log.error("proxy retry timeout, retry count: ", (ctx.balancer_try_count or 1) - 1,
                            ", deadline: ", ctx.proxy_retry_deadline, " now: ", ngx_now())
             return core.response.exit(502)
         end
         -- retry
-        server, err = pick_server(route, ctx)
+        server, err = pick_server(route, ctx)   --从load_balancer中重新找一个server
         if not server then
             core.log.error("failed to pick server: ", err)
             return core.response.exit(502)
@@ -383,6 +400,7 @@ function _M.run(route, ctx, plugin_funcs)
 
     core.log.info("proxy request to ", server.host, ":", server.port)
 
+    --设置upstream的 keepalive_pool ngx.balancer.set_current_peer
     local ok, err = set_current_peer(server, ctx)
     if not ok then
         core.log.error("failed to set server peer [", server.host, ":",
@@ -390,7 +408,7 @@ function _M.run(route, ctx, plugin_funcs)
         return core.response.exit(502)
     end
 
-    ctx.proxy_passed = true
+    ctx.proxy_passed = true     --标识请求是否转发到了upstream
 end
 
 

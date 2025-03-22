@@ -37,7 +37,7 @@ local function check_conf(id, conf, need_id)
     return true
 end
 
-
+-- 插件里是否配置了upstream_id, 当前只有traffic-split插件支持配置 upstream_id
 local function up_id_in_plugins(plugins, up_id)
     if plugins and plugins["traffic-split"]
         and plugins["traffic-split"].rules then
@@ -59,9 +59,11 @@ end
 
 local function check_resources_reference(resources, up_id,
                                          only_check_plugin, resources_name)
+    -- resources可能是consumer、consumer_group、routes、service、plugin_config、global_rules
     if resources then
         for _, resource in config_util.iterate_values(resources) do
             if resource and resource.value then
+                -- 检查resources配置的插件里是否配置了upstream_id
                 if up_id_in_plugins(resource.value.plugins, up_id) then
                     return {error_msg = "can not delete this upstream,"
                                         .. " plugin in "
@@ -81,7 +83,7 @@ local function check_resources_reference(resources, up_id,
     end
 end
 
-
+-- 检查各类资源上是否引用此upstream， 包含(consumer、consumer_group、routes、service、plugin_config、global_rules)
 local function delete_checker(id)
     local routes = get_routes()
     local err_msg = check_resources_reference(routes, id, false, "route")

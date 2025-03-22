@@ -69,6 +69,7 @@ end
 
 local fetch_control_api_router
 do
+    -- 注册route
     local function register_api_routes(routes, api_routes)
         for _, route in ipairs(api_routes) do
             core.table.insert(routes, {
@@ -95,7 +96,7 @@ do
 
 function fetch_control_api_router()
     core.table.clear(routes)
-
+    -- 遍历所有已加载的插件，将其control_api的返回注册到controller_api_router中
     for _, plugin in ipairs(plugin_mod.plugins) do
         local api_fun = plugin.control_api
         if api_fun then
@@ -104,6 +105,7 @@ function fetch_control_api_router()
         end
     end
 
+    -- 支持discovery模块实现的control_api
     local discovery_type = require("apisix.core.config_local").local_conf().discovery
     if discovery_type then
         local discovery = require("apisix.discovery.init").discovery
@@ -138,14 +140,16 @@ function fetch_control_api_router()
         end
     end
 
+    -- 构建v1_routes，处理v1版本的admin-api
     core.table.clear(v1_routes)
-    register_api_routes(v1_routes, builtin_v1_routes)
+    register_api_routes(v1_routes, builtin_v1_routes)       -- 内置的v1版本的admin接口
 
     local v1_router, err = router.new(v1_routes)
     if not v1_router then
         return nil, err
     end
 
+    -- 将v1_route集成到routes中
     core.table.insert(routes, {
         paths = {"/v1/*"},
         filter_fun = function(vars, opts, ...)
@@ -178,6 +182,7 @@ do
     local cached_version
     local router
 
+-- 插件实现的control_api 方法 plugin.control_api
 function _M.match(uri)
     if cached_version ~= plugin_mod.load_times then
         local err

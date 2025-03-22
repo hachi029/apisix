@@ -32,7 +32,8 @@ local _M = {
     version = 0.1,
 }
 
-
+-- 一直执行callback_fun，直到满足一下条件
+-- timer.each_ttl <= 0 or now() >= timer.start_time + timer.each_ttl
 local function _internal(timer)
     timer.start_time = now()
 
@@ -54,7 +55,7 @@ local function _internal(timer)
 end
 
 local function run_timer(premature, self)
-    if self.running or premature then
+    if self.running or premature then   -- 如果正在执行，则直接返回。
         return
     end
 
@@ -68,7 +69,7 @@ local function run_timer(premature, self)
     self.running = false
 end
 
-
+-- 每opts.check_interval 执行一次 callback_fun
 function _M.new(name, callback_fun, opts)
     if not name then
         return nil, "missing argument: name"
@@ -81,22 +82,23 @@ function _M.new(name, callback_fun, opts)
     opts = opts or {}
     local timer = {
         name       = name,
-        each_ttl   = opts.each_ttl or 1,
-        sleep_succ = opts.sleep_succ or 1,
-        sleep_fail = opts.sleep_fail or 5,
+        each_ttl   = opts.each_ttl or 1,    -- 每check_interval周期中，each_ttl时间内callback_fun一直执行
+        sleep_succ = opts.sleep_succ or 1,  -- 每次callback_fun执行成功后sleep的时间
+        sleep_fail = opts.sleep_fail or 5,  -- 每次callback_fun执行失败后sleep的时间
         start_time = 0,
 
         callback_fun = callback_fun,
         running = false,
     }
 
-    local hdl, err = timer_every(opts.check_interval or 1,
+    -- run_timer里可以保证 不会有多个routine同时执行callback_fun
+    local hdl, err = timer_every(opts.check_interval or 1,  -- 每隔check_interval秒执行一次run_timer
                                  run_timer, timer)
     if not hdl then
         return nil, err
     end
 
-    hdl, err = timer_at(0, run_timer, timer)
+    hdl, err = timer_at(0, run_timer, timer)    --立即执行一次
     if not hdl then
         return nil, err
     end

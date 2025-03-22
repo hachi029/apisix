@@ -154,7 +154,7 @@ function _M.get_upstream_status(ctx)
     return tonumber(str_sub(ctx.var.upstream_status or "", -3))
 end
 
-
+-- 当修改响应体时，需要修改的响应头
 function _M.clear_header_as_body_modified()
     ngx.header.content_length = nil
     -- in case of upstream content is compressed content
@@ -176,6 +176,8 @@ end
 --  final_body = transform(final_body)
 --  ngx.arg[1] = final_body
 --  ...
+-- 每个chunk保存到ctx._body_buffer中。ctx._body_buffer key为插件名称，value为chunk array
+-- return nil 表示响应体还没读完
 function _M.hold_body_chunk(ctx, hold_the_copy, max_resp_body_bytes)
     local body_buffer
     local chunk, eof = arg[1], arg[2]
@@ -199,6 +201,7 @@ function _M.hold_body_chunk(ctx, hold_the_copy, max_resp_body_bytes)
             body_buffer[n] = chunk
             ctx._resp_body_bytes = ctx._resp_body_bytes + #chunk
         end
+        -- 如果达到了最大响应体大小，返回
         if max_resp_body_bytes and ctx._resp_body_bytes >= max_resp_body_bytes then
             local body_data = concat_tab(body_buffer, "", 1, body_buffer.n)
             body_data = str_sub(body_data, 1, max_resp_body_bytes)
@@ -206,7 +209,7 @@ function _M.hold_body_chunk(ctx, hold_the_copy, max_resp_body_bytes)
         end
     end
 
-    if eof then
+    if eof then     -- 最后一个chunk
         body_buffer = ctx._body_buffer[ctx._plugin_name]
         if not body_buffer then
             if max_resp_body_bytes and #chunk >= max_resp_body_bytes then

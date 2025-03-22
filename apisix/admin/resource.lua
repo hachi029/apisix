@@ -333,6 +333,7 @@ function _M:delete(id, conf, sub_path, uri_args)
         key = self.get_resource_etcd_key(id, conf, sub_path, uri_args)
     end
 
+    -- 删除校验，一些实体存在引用关系，被引用的实体不能直接删除
     if self.delete_checker and uri_args.force ~= "true" then
         local code, err = self.delete_checker(id)
         if err then

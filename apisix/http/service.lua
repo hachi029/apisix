@@ -58,7 +58,7 @@ function _M.init_worker()
         automatic = true,
         item_schema = core.schema.service,
         checker = plugin_checker,
-        filter = filter,
+        filter = filter, -- filter在配置更新时被调用
     })
     if not services then
         error("failed to create etcd instance for fetching /services: " .. err)

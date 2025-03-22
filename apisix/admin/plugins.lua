@@ -95,7 +95,7 @@ function _M.get(name)
     return 200, json_schema
 end
 
-
+-- 获取插件名称列表，列表根据插件的优先级进行了排序
 function _M.get_plugins_list(subsystem)
     local http_plugins
     local stream_plugins

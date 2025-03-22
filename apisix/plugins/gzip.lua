@@ -86,7 +86,8 @@ local schema = {
 
 local plugin_name = "gzip"
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/gzip/
+-- 是用lua动态实现了的nginx的gzip模块，最终调用nginx函数，对响应进行gzip压缩
 local _M = {
     version = 0.1,
     priority = 995,
@@ -106,7 +107,7 @@ function _M.header_filter(conf, ctx)
         return 501
     end
 
-    local types = conf.types
+    local types = conf.types        -- 配置的哪些content_type需要gzip压缩
     local content_type = ngx_header["Content-Type"]
     if not content_type then
         -- Like Nginx, don't gzip if Content-Type is missing
@@ -127,11 +128,12 @@ function _M.header_filter(conf, ctx)
             end
         end
 
-        if not matched then
+        if not matched then     -- 未匹配，直接返回
             return
         end
     end
 
+    -- content_length 项，超过配置的content_length，才启用gzip
     local content_length = tonumber(ngx_header["Content-Length"])
     if content_length then
         local min_length = conf.min_length
@@ -141,6 +143,7 @@ function _M.header_filter(conf, ctx)
         -- Like Nginx, don't check min_length if Content-Length is missing
     end
 
+    -- http_version配置项
     local http_version = req_http_version()
     if http_version < conf.http_version then
         return
@@ -151,6 +154,7 @@ function _M.header_filter(conf, ctx)
     core.log.info("set gzip with buffers: ", buffers.number, " ", buffers.size,
                   ", level: ", conf.comp_level)
 
+    -- 通过ffi调用nginx函数
     local ok, err = response.set_gzip({
         buffer_num = buffers.number,
         buffer_size = buffers.size,
@@ -161,6 +165,7 @@ function _M.header_filter(conf, ctx)
         return
     end
 
+    -- 与缓存相关
     if conf.vary then
         core.response.add_header("Vary", "Accept-Encoding")
     end

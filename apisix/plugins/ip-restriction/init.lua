@@ -50,7 +50,8 @@ local schema = {
 
 local plugin_name = "ip-restriction"
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ip-restriction/
+-- 可以配置ip黑白名单，黑白名单只能使用其中之一
 local _M = {
     version = 0.1,
     priority = 3000,
@@ -91,7 +92,7 @@ function _M.restrict(conf, ctx)
     local block = false
     local remote_addr = ctx.var.remote_addr
 
-    if conf.blacklist then
+    if conf.blacklist then      -- ip黑名单
         local matcher = lrucache(conf.blacklist, nil,
                                  core.ip.create_ip_matcher, conf.blacklist)
         if matcher then

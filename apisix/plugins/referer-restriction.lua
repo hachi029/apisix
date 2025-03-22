@@ -55,7 +55,8 @@ local schema = {
 
 local plugin_name = "referer-restriction"
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/referer-restriction/
+-- 限制referer, 配置referer黑白名单
 local _M = {
     version = 0.1,
     priority = 2990,
