@@ -50,7 +50,9 @@ local schema = {
 
 
 local plugin_name = "uri-blocker"
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/uri-blocker/
+-- block_rules：正则url列表，命中任一正则，则返回reject
+-- rejected {status, message}
 local _M = {
     version = 0.1,
     priority = 2900,
@@ -82,7 +84,7 @@ function _M.rewrite(conf, ctx)
     core.log.info("uri: ", ctx.var.request_uri)
     core.log.info("block uri rules: ", conf.block_rules_concat)
 
-    if not conf.block_rules_concat then
+    if not conf.block_rules_concat then     --将所有正则组成一个大的正则 （regx1|regx2|regx3|）
         local block_rules = {}
         for i, re_rule in ipairs(conf.block_rules) do
             block_rules[i] = re_rule
@@ -96,7 +98,7 @@ function _M.rewrite(conf, ctx)
     end
 
     local from = re_find(ctx.var.request_uri, conf.block_rules_concat, "jo")
-    if from then
+    if from then    -- 命中
         if conf.rejected_msg then
             return conf.rejected_code, { error_msg = conf.rejected_msg }
         end

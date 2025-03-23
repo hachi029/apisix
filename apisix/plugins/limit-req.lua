@@ -84,7 +84,8 @@ local schema = {
     }
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/limit-req/
+-- 使用漏桶算法限制单个客户端对服务的请求速率
 local _M = {
     version = 0.1,
     priority = 1001,

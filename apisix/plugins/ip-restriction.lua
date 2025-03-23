@@ -17,7 +17,7 @@
 local core = require("apisix.core")
 local base = require("apisix.plugins.ip-restriction.init")
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ip-restriction/
 -- avoid unexpected data sharing
 local ip_restriction = core.table.clone(base)
 ip_restriction.access = base.restrict

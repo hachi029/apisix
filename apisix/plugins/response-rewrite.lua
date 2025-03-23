@@ -150,7 +150,9 @@ local schema = {
     }
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/response-rewrite/
+-- 修改上游服务或 APISIX 返回的 Body 和 Header 信息。
+-- 运行在header_filter或body_filter阶段
 local _M = {
     version  = 0.1,
     priority = 899,
@@ -256,13 +258,13 @@ function _M.body_filter(conf, ctx)
 
     if conf.filters then
 
-        local body = core.response.hold_body_chunk(ctx)
+        local body = core.response.hold_body_chunk(ctx) --获取响应体
         if not body then
             return
         end
 
         local err
-        if ctx.response_encoding ~= nil then
+        if ctx.response_encoding ~= nil then        --gzip/br解压缩处理
             local decoder = content_decode.dispatch_decoder(ctx.response_encoding)
             if not decoder then
                 core.log.error("filters may not work as expected ",
@@ -277,6 +279,7 @@ function _M.body_filter(conf, ctx)
             end
         end
 
+        -- filters 是一组正则匹配替换表达式。{regex='', scope='', replace='', options=''}
         for _, filter in ipairs(conf.filters) do
             if filter.scope == "once" then
                 body, _, err = re_sub(body, filter.regex, filter.replace, filter.options)
@@ -292,7 +295,7 @@ function _M.body_filter(conf, ctx)
         return
     end
 
-    if conf.body then
+    if conf.body then       -- body直接替换
         ngx.arg[2] = true
         if conf.body_base64 then
             ngx.arg[1] = ngx.decode_base64(conf.body)
@@ -306,7 +309,7 @@ end
 local function create_header_operation(hdr_conf)
     local set = {}
     local add = {}
-    if is_new_headers_conf(hdr_conf) then
+    if is_new_headers_conf(hdr_conf) then       -- is_new_headers_conf验证hdr_conf格式是否正确
         if hdr_conf.add then
             for _, value in ipairs(hdr_conf.add) do
                 local m, err = re_match(value, [[^([^:\s]+)\s*:\s*([^:]+)$]], "jo")
@@ -339,22 +342,25 @@ end
 
 
 function _M.header_filter(conf, ctx)
-    ctx.response_rewrite_matched = vars_matched(conf, ctx)
+    ctx.response_rewrite_matched = vars_matched(conf, ctx) -- conf.var 表达式过滤是否执行
     if not ctx.response_rewrite_matched then
         return
     end
 
-    if conf.status_code then
+    if conf.status_code then        -- status_code
         ngx.status = conf.status_code
     end
 
     -- if filters have no any match, response body won't be modified.
-    if conf.filters or conf.body then
+    if conf.filters or conf.body then       -- 如果有filters或body配置，表明会修改响应体
         local response_encoding = ngx_header["Content-Encoding"]
         core.response.clear_header_as_body_modified()
         ctx.response_encoding = response_encoding
     end
 
+    -- headers配置 {add={"X-Server-status": "on",
+    --                    "X-Server-balancer-addr": "$balancer_ip:$balancer_port"},
+    -- set={},remove={}}, 支持$var形式的变量
     if not conf.headers then
         return
     end
@@ -366,19 +372,19 @@ function _M.header_filter(conf, ctx)
         return
     end
 
-    local field_cnt = #hdr_op.add
+    local field_cnt = #hdr_op.add       -- 增加header
     for i = 1, field_cnt, 2 do
         local val = core.utils.resolve_var(hdr_op.add[i+1], ctx.var)
         core.response.add_header(hdr_op.add[i], val)
     end
 
-    local field_cnt = #hdr_op.set
+    local field_cnt = #hdr_op.set     -- 设置header
     for i = 1, field_cnt, 2 do
         local val = core.utils.resolve_var(hdr_op.set[i+1], ctx.var)
         core.response.set_header(hdr_op.set[i], val)
     end
 
-    local field_cnt = #hdr_op.remove
+    local field_cnt = #hdr_op.remove   --删除header
     for i = 1, field_cnt do
         core.response.set_header(hdr_op.remove[i], nil)
     end

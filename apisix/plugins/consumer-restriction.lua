@@ -63,6 +63,8 @@ local schema = {
 
 local plugin_name = "consumer-restriction"
 
+--https://apisix.apache.org/zh/docs/apisix/plugins/referer-restriction/
+--
 local _M = {
     version = 0.1,
     priority = 2400,

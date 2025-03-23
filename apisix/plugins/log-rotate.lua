@@ -56,7 +56,8 @@ local schema = {
     properties = {},
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/log-rotate/
+-- 用于定期切分日志目录下的访问日志和错误日志
 local _M = {
     version = 0.1,
     priority = 100,
@@ -74,7 +75,9 @@ local function file_exists(path)
     return file ~= nil
 end
 
-
+-- 获取文件路径
+-- $prefix/logs/access.log or $prefix/logs/error.log
+-- return $prefix/logs, file_type
 local function get_log_path_info(file_type)
     local_conf = core.config.local_conf()
     local conf_path
@@ -110,7 +113,7 @@ local function tab_sort_comp(a, b)
     return a > b
 end
 
-
+-- log_file_name error.log 或error.log
 local function scan_log_folder(log_file_name)
     local t = {}
 
@@ -127,11 +130,11 @@ local function scan_log_folder(log_file_name)
         end
     end
 
-    core.table.sort(t, tab_sort_comp)
+    core.table.sort(t, tab_sort_comp)   --根据文件名(字符串)进行排序
     return t, log_dir
 end
 
-
+-- 文件重命名
 local function rename_file(log, date_str)
     local new_file
     if not log.new_file then
@@ -155,7 +158,8 @@ local function rename_file(log, date_str)
     return new_file
 end
 
-
+-- 压缩日志
+-- timeout 压缩文件超时时间
 local function compression_file(new_file, timeout)
     if not new_file or type(new_file) ~= "string" then
         core.log.info("compression file: ", new_file, " invalid")
@@ -178,14 +182,15 @@ local function compression_file(new_file, timeout)
         return
     end
 
-    ok, stderr = os_remove(new_file)
+    ok, stderr = os_remove(new_file)    --移除原始文件
     if stderr then
         core.log.error("remove uncompressed log file: ", new_file,
                        " fail, err: ", stderr, "  res:", ok)
     end
 end
 
-
+-- log_info: {}
+-- log_type: access.log or error.log
 local function init_default_logs(logs_info, log_type)
     local filepath, filename = get_log_path_info(log_type)
     logs_info[log_type] = { type = log_type }
@@ -204,13 +209,16 @@ local function file_size(file)
     return 0
 end
 
-
+-- files: 需要切分的文件路径数组
+-- max_kept: 保留的日志文件数量，默认7*24;
+-- timeout: 压缩日志操作的超时时间
 local function rotate_file(files, now_time, max_kept, timeout)
     if core.table.isempty(files) then
         return
     end
 
-    local new_files = core.table.new(2, 0)
+    -- 切分过程，1)将当前文件重命名;2)给master进程发送USR1信号;3)重命名后的文件压缩;4)移除最旧的文件
+    local new_files = core.table.new(2, 0)  --新文件名
     -- rename the log files
     for _, file in ipairs(files) do
         local now_date = os_date("%Y-%m-%d_%H-%M-%S", now_time)
@@ -223,14 +231,14 @@ local function rotate_file(files, now_time, max_kept, timeout)
     end
 
     -- send signal to reopen log files
-    local pid = process.get_master_pid()
+    local pid = process.get_master_pid()        --对master进程发送USR1信号
     core.log.warn("send USR1 signal to master process [", pid, "] for reopening log file")
     local ok, err = signal.kill(pid, signal.signum("USR1"))
     if not ok then
         core.log.error("failed to send USR1 signal for reopening log file: ", err)
     end
 
-    if enable_compression then
+    if enable_compression then  --对日志进行压缩
         -- Waiting for nginx reopen files
         -- to avoid losing logs during compression
         ngx_sleep(0.5)
@@ -240,7 +248,7 @@ local function rotate_file(files, now_time, max_kept, timeout)
         end
     end
 
-    for _, file in ipairs(files) do
+    for _, file in ipairs(files) do     --移除最旧的文件
         -- clean the oldest file
         local log_list, log_dir = scan_log_folder(file)
         for i = max_kept + 1, #log_list do
@@ -255,9 +263,9 @@ end
 
 
 local function rotate()
-    local interval = INTERVAL
-    local max_kept = MAX_KEPT
-    local max_size = MAX_SIZE
+    local interval = INTERVAL -- 1 hour, 多久进行一次切分
+    local max_kept = MAX_KEPT -- 24*7 最大保留文件数量
+    local max_size = MAX_SIZE -- -1
     local attr = plugin.plugin_attr(plugin_name)
     local timeout = 10000 -- default timeout 10 seconds
     if attr then
@@ -276,27 +284,27 @@ local function rotate()
     if not default_logs then
         -- first init default log filepath and filename
         default_logs = {}
-        init_default_logs(default_logs, DEFAULT_ACCESS_LOG_FILENAME)
-        init_default_logs(default_logs, DEFAULT_ERROR_LOG_FILENAME)
+        init_default_logs(default_logs, DEFAULT_ACCESS_LOG_FILENAME) --access.log`
+        init_default_logs(default_logs, DEFAULT_ERROR_LOG_FILENAME)  --error.log
     end
 
     ngx_update_time()
     local now_time = ngx_time()
-    if not rotate_time then
+    if not rotate_time then         --下次执行切分的时间
         -- first init rotate time
         rotate_time = now_time + interval - (now_time % interval)
         core.log.info("first init rotate time is: ", rotate_time)
         return
     end
 
-    if now_time >= rotate_time then
+    if now_time >= rotate_time then     --需要进行切分
         local files = {DEFAULT_ACCESS_LOG_FILENAME, DEFAULT_ERROR_LOG_FILENAME}
         rotate_file(files, now_time, max_kept, timeout)
 
         -- reset rotate time
         rotate_time = rotate_time + interval
 
-    elseif max_size > 0 then
+    elseif max_size > 0 then            --文件大小超限了，需要切分
         local access_log_file_size = file_size(default_logs[DEFAULT_ACCESS_LOG_FILENAME].file)
         local error_log_file_size = file_size(default_logs[DEFAULT_ERROR_LOG_FILENAME].file)
         local files = core.table.new(2, 0)
@@ -315,6 +323,7 @@ end
 
 
 function _M.init()
+    -- 由特权进程执行
     timers.register_timer("plugin#log-rotate", rotate, true)
 end
 

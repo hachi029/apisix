@@ -93,6 +93,9 @@ local schema = {
 
 local plugin_name = "traffic-split"
 
+-- https://apisix.apache.org/zh/docs/apisix/plugins/traffic-split/
+-- 可以通过配置 match 和 weighted_upstreams 属性，从而动态地将部分流量引导至各种上游服务。
+-- 该插件可应用于灰度发布和蓝绿发布的场景
 local _M = {
     version = 0.1,
     priority = 966,
@@ -234,8 +237,10 @@ function _M.access(conf, ctx)
     local weighted_upstreams
     local match_passed = true
 
+    --匹配命中的rule, 结果为weighted_upstreams
     for _, rule in ipairs(conf.rules) do
         -- check if all upstream_ids are valid
+        -- 检查upstream_ids是否有效
         if rule.weighted_upstreams then
             for _, wupstream in ipairs(rule.weighted_upstreams) do
                 local ups_id = wupstream.upstream_id
@@ -276,10 +281,11 @@ function _M.access(conf, ctx)
 
     core.log.info("match_passed: ", match_passed)
 
-    if not match_passed then
+    if not match_passed then    --未匹配，使用默认配置的upstream
         return
     end
 
+    -- 使用weighted_rr负载均衡算法
     local rr_up, err = lrucache(weighted_upstreams, nil, new_rr_obj, weighted_upstreams)
     if not rr_up then
         core.log.error("lrucache roundrobin failed: ", err)

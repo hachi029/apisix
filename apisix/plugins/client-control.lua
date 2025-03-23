@@ -34,7 +34,8 @@ local schema = {
 
 local plugin_name = "client-control"
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/client-control/
+-- 动态调整 client_max_body_size
 local _M = {
     version = 0.1,
     priority = 22000,
@@ -64,6 +65,7 @@ function _M.rewrite(conf, ctx)
         end
 
         -- then check it when reading the body
+        --通过ffi调用ngx_http_apisix_client_set_max_body_size
         local ok, err = apisix_ngx_client.set_client_max_body_size(conf.max_body_size)
         if not ok then
             core.log.error("failed to set client max body size: ", err)

@@ -49,6 +49,7 @@ end
 
 -- attach common methods if the router doesn't provide its custom implementation
 local function attach_http_router_common_methods(http_router)
+    -- http_router.routes()返回的是 config_etcd.values
     if http_router.routes == nil then
         http_router.routes = function ()
             if not http_router.user_routes then
@@ -67,7 +68,7 @@ local function attach_http_router_common_methods(http_router)
     end
 end
 
-
+-- init_worker
 function _M.http_init_worker()
     local conf = core.config.local_conf()
     local router_http_name = "radixtree_uri"
@@ -78,15 +79,19 @@ function _M.http_init_worker()
         router_ssl_name = conf.apisix.router.ssl or router_ssl_name
     end
 
+    -- 初始化http路由
     local router_http = require("apisix.http.router." .. router_http_name)
     attach_http_router_common_methods(router_http)
+    --会调到 apisix.http.route.init_worker,进而初始化config_etcd.new("/routes", opt)
     router_http.init_worker(filter)
     _M.router_http = router_http
 
+    -- 初始化https路由
     local router_ssl = require("apisix.ssl.router." .. router_ssl_name)
     router_ssl.init_worker()
     _M.router_ssl = router_ssl
 
+    -- 初始化api路由
     _M.api = require("apisix.api_router")
 end
 
@@ -107,7 +112,7 @@ end
 function _M.ssls()
     return _M.router_ssl.ssls()
 end
-
+-- 返回的是 config_etcd.values, config_etcd.conf_version
 function _M.http_routes()
     if not _M.router_http then
         return nil, nil

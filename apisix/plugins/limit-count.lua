@@ -38,6 +38,7 @@ function _M.access(conf, ctx)
     return limit_count.rate_limit(conf, ctx, plugin_name, 1)
 end
 
+-- plugin初始化时调用。配合workflow插件
 function _M.workflow_handler()
     workflow.register(plugin_name,
     function (conf, ctx)

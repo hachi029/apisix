@@ -144,6 +144,8 @@ local metadata_schema = {
     },
 }
 
+-- https://apisix.apache.org/zh/docs/apisix/plugins/kafka-logger/
+-- 将日志作为 JSON 对象推送到 Apache Kafka 集群中
 local _M = {
     version = 0.1,
     priority = 403,
@@ -217,7 +219,7 @@ end
 function _M.access(conf, ctx)
     if conf.include_req_body then
         local should_read_body = true
-        if conf.include_req_body_expr then
+        if conf.include_req_body_expr then  --是否发送请求体
             if not conf.request_expr then
                 local request_expr, err = expr.new(conf.include_req_body_expr)
                 if not request_expr then

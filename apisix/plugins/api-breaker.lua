@@ -125,7 +125,8 @@ local function gen_lasttime_key(ctx)
     return "unhealthy-lasttime" .. core.request.get_host(ctx) .. ctx.var.uri
 end
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/api-breaker/
+-- 当上游不健康次数超过配置后，熔断配置时间内不再往upstream转发请求
 local _M = {
     version = 0.1,
     name = plugin_name,
@@ -140,6 +141,7 @@ end
 
 
 function _M.access(conf, ctx)
+    -- "unhealthy-" .. core.request.get_host(ctx) .. ctx.var.uri
     local unhealthy_key = gen_unhealthy_key(ctx)
     -- unhealthy counts
     local unhealthy_count, err = shared_buffer:get(unhealthy_key)
@@ -149,11 +151,12 @@ function _M.access(conf, ctx)
         return
     end
 
-    if not unhealthy_count then
+    if not unhealthy_count then     --健康
         return
     end
 
     -- timestamp of the last time a unhealthy state was triggered
+    -- "unhealthy-lasttime" .. core.request.get_host(ctx) .. ctx.var.uri
     local lasttime_key = gen_lasttime_key(ctx)
     local lasttime, err = shared_buffer:get(lasttime_key)
     if err then
@@ -162,7 +165,7 @@ function _M.access(conf, ctx)
         return
     end
 
-    if not lasttime then
+    if not lasttime then    --
         return
     end
 
@@ -172,14 +175,14 @@ function _M.access(conf, ctx)
     end
 
     -- cannot exceed the maximum value of the user configuration
-    local breaker_time = 2 ^ failure_times
+    local breaker_time = 2 ^ failure_times      --breaker_time指数级增长
     if breaker_time > conf.max_breaker_sec then
         breaker_time = conf.max_breaker_sec
     end
     core.log.info("breaker_time: ", breaker_time)
 
     -- breaker
-    if lasttime + breaker_time >= ngx.time() then
+    if lasttime + breaker_time >= ngx.time() then -- 还在熔断时间窗口内
         if conf.break_response_body then
             if conf.break_response_headers then
                 for _, value in ipairs(conf.break_response_headers) do
@@ -198,6 +201,7 @@ end
 
 function _M.log(conf, ctx)
     local unhealthy_key = gen_unhealthy_key(ctx)
+    -- "healthy-" .. core.request.get_host(ctx) .. ctx.var.uri
     local healthy_key = gen_healthy_key(ctx)
     local upstream_status = core.response.get_upstream_status(ctx)
 
@@ -208,7 +212,7 @@ function _M.log(conf, ctx)
     -- unhealthy process
     if core.table.array_find(conf.unhealthy.http_statuses,
                              upstream_status)
-    then
+    then    -- unhealthy
         local unhealthy_count, err = shared_buffer:incr(unhealthy_key, 1, 0)
         if err then
             core.log.warn("failed to incr unhealthy_key: ", unhealthy_key,
@@ -217,7 +221,7 @@ function _M.log(conf, ctx)
         core.log.info("unhealthy_key: ", unhealthy_key, " count: ",
                       unhealthy_count)
 
-        shared_buffer:delete(healthy_key)
+        shared_buffer:delete(healthy_key)   --healthy_key被重置
 
         -- whether the user-configured number of failures has been reached,
         -- and if so, the timestamp for entering the unhealthy state.
@@ -236,6 +240,7 @@ function _M.log(conf, ctx)
         return
     end
 
+    -- log healthy
     local unhealthy_count, err = shared_buffer:get(unhealthy_key)
     if err then
         core.log.warn("failed to `get` unhealthy_key: ", unhealthy_key,
@@ -246,6 +251,7 @@ function _M.log(conf, ctx)
         return
     end
 
+    -- 说明此时处于熔断中
     local healthy_count, err = shared_buffer:incr(healthy_key, 1, 0)
     if err then
         core.log.warn("failed to `incr` healthy_key: ", healthy_key,
@@ -253,7 +259,7 @@ function _M.log(conf, ctx)
     end
 
     -- clear related status
-    if healthy_count >= conf.healthy.successes then
+    if healthy_count >= conf.healthy.successes then     --恢复正常
         -- stat change to normal
         core.log.info("change to normal, ", healthy_key, " ", healthy_count)
         shared_buffer:delete(gen_lasttime_key(ctx))

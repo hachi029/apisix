@@ -54,7 +54,8 @@ local schema = {
         }
     }
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/request-id/
+-- 为每一个请求代理添加 unique ID 用于追踪 API 请求
 local _M = {
     version = 0.1,
     priority = 12015,
@@ -94,13 +95,14 @@ end
 function _M.rewrite(conf, ctx)
     local headers = ngx.req.get_headers()
     local uuid_val
-    if not headers[conf.header_name] then
+    if not headers[conf.header_name] then   --如果请求头里没有request_id，则设置一个
         uuid_val = get_request_id(conf)
         core.request.set_header(ctx, conf.header_name, uuid_val)
     else
         uuid_val = headers[conf.header_name]
     end
 
+    --将request-id设置到响应头， 增加"request-id-"前缀可以避免ctx上变量被误覆盖
     if conf.include_in_response then
         ctx["request-id-" .. conf.header_name] = uuid_val
     end

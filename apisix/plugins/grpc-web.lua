@@ -56,7 +56,8 @@ local grpc_web_content_encoding = {
     ["application/grpc-web+proto"] = CONTENT_ENCODING_BINARY,
     ["application/grpc-web-text+proto"] = CONTENT_ENCODING_BASE64,
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/grpc-web/
+-- 代理插件，可以处理从 JavaScript 客户端到 gRPC Service 的 gRPC Web 请求
 local _M = {
     version = 0.1,
     priority = 505,

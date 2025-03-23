@@ -57,6 +57,9 @@ local schema = {
 
 local plugin_name = "workflow"
 
+-- https://apisix.apache.org/zh/docs/apisix/plugins/workflow/
+-- 引入 lua-resty-expr 来提供复杂的流量控制功能
+-- rules.case expr数组; rules.actions: 当case匹配成功时执行的动作,可以是 return 或 limit-count
 local _M = {
     version = 0.1,
     priority = 1006,
@@ -100,7 +103,7 @@ local support_action = {
     }
 }
 
-
+-- 只有limit-count插件注册了action
 function _M.register(plugin_name, handler, check_schema)
     support_action[plugin_name] = {
         handler        = handler,
@@ -143,7 +146,7 @@ end
 
 
 function _M.access(conf, ctx)
-    for _, rule in ipairs(conf.rules) do
+    for _, rule in ipairs(conf.rules) do    --执行每条rule
         local match_result = true
         if rule.case then
             local expr, _ = expr.new(rule.case)

@@ -69,7 +69,8 @@ local metadata_schema = {
     }
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/file-logger/
+-- 日志数据存储到指定位置
 local _M = {
     version = 0.1,
     priority = 399,
@@ -101,6 +102,8 @@ if is_apisix_or then
         type = "plugin",
     })
 
+    -- conf:
+    -- handler: {}
     local function open_file_handler(conf, handler)
         local file, err = io_open(conf.path, 'a+')
         if not file then
@@ -116,14 +119,16 @@ if is_apisix_or then
     end
 
     function open_file_cache(conf)
+        -- 调用的是 ngx_worker_process_get_last_reopen_ms
         local last_reopen_time = process.get_last_reopen_ms()
 
+        -- lru_cache
         local handler, err = path_to_file(conf.path, 0, open_file_handler, conf, {})
         if not handler then
             return nil, err
         end
 
-        if handler.open_time < last_reopen_time then
+        if handler.open_time < last_reopen_time then --说明文件已经reopen过了，handler已经过期，需要关闭
             core.log.notice("reopen cached log file: ", conf.path)
             handler.file:close()
 
@@ -143,7 +148,7 @@ local function write_file_data(conf, log_message)
 
     local file, err
     if open_file_cache then
-        file, err = open_file_cache(conf)
+        file, err = open_file_cache(conf)   --handler缓存
     else
         file, err = io_open(conf.path, 'a+')
     end

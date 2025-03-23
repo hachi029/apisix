@@ -25,13 +25,14 @@ local utils          = require("apisix.core.utils")
 local dns_utils      = require("resty.dns.utils")
 local config_local   = require("apisix.core.config_local")
 
-
+--存储直接从本机/etc/hosts解析出来的DNS缓存，key为host, value为ip
 local HOSTS_IP_MATCH_CACHE = {}
 
 
 local _M = {}
 
 
+--解析/etc/hosts
 local function init_hosts_ip()
     local hosts, err = dns_utils.parseHosts()
     if not hosts then
@@ -58,9 +59,11 @@ end
 -- @treturn string The IP of the domain name after being resolved.
 -- @usage
 -- local ip, err = core.resolver.parse_domain("apache.org") -- "198.18.10.114"
+-- 解析host, 先从/etc/hosts中解析，然后使用dns解析
 function _M.parse_domain(host)
     local rev = HOSTS_IP_MATCH_CACHE[host]
     local enable_ipv6 = config_local.local_conf().apisix.enable_ipv6
+    -- 1. 命中/etc/hosts
     if rev then
         -- use ipv4 in high priority
         local ip = rev["ipv4"]
@@ -75,6 +78,7 @@ function _M.parse_domain(host)
         end
     end
 
+    --2. dns_parse
     local ip_info, err = utils.dns_parse(host)
     if not ip_info then
         log.error("failed to parse domain: ", host, ", error: ",err)

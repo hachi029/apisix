@@ -68,7 +68,8 @@ local metadata_schema = {
     },
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/skywalking-logger/
+--  APISIX 的访问日志数据推送到 SkyWalking OAP 服务器
 local _M = {
     version = 0.1,
     priority = 408,

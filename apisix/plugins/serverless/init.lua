@@ -26,7 +26,8 @@ local phases = {
     "log", "before_proxy"
 }
 
-
+-- plugin_name: serverless-pre-function or serverless-post-function
+-- 在指定阶段前执行或指定阶段后执行
 return function(plugin_name, priority)
     local core = require("apisix.core")
 
@@ -59,6 +60,7 @@ return function(plugin_name, priority)
         schema = schema,
     }
 
+    -- loadstring
     local function load_funcs(functions)
         local funcs = core.table.new(#functions, 0)
 
@@ -73,14 +75,14 @@ return function(plugin_name, priority)
     end
 
     local function call_funcs(phase, conf, ctx)
-        if phase ~= conf.phase then
+        if phase ~= conf.phase then     --只有配置的phase才会执行
             return
         end
 
         local functions = core.lrucache.plugin_ctx(lrucache, ctx, nil,
                                                    load_funcs, conf.functions)
 
-        for _, func in ipairs(functions) do
+        for _, func in ipairs(functions) do     -- 依次执行相关方法
             local code, body = func(conf, ctx)
             if code or body then
                 return code, body
@@ -115,7 +117,7 @@ return function(plugin_name, priority)
     end
 
     for _, phase in ipairs(phases) do
-        _M[phase] = function (conf, ctx)
+        _M[phase] = function (conf, ctx)    -- all phases
             return call_funcs(phase, conf, ctx)
         end
     end

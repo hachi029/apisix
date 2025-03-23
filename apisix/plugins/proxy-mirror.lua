@@ -48,7 +48,8 @@ local schema = {
     },
     required = {"host"},
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/proxy-mirror/
+-- 将生产真实流量拷贝到镜像服务中
 local _M = {
     version = 0.1,
     priority = 1010,
@@ -94,19 +95,21 @@ local function enable_mirror(ctx, conf)
                 ctx.var.uri .. ctx.var.is_args .. (ctx.var.args or '')
 
     if conf.path then
+        --prefix 模式将会使用 path + 来源请求 URI 作为镜像请求的路径
         if conf.path_concat_mode == "prefix" then
             uri = conf.path .. uri
-        else
+        else -- replace 模式将会直接使用 path 作为镜像请求的路径
             uri = conf.path .. ctx.var.is_args .. (ctx.var.args or '')
         end
     end
 
+    -- 域名解析
     local _, mirror_host = resolver_host(conf.host)
     ctx.var.upstream_mirror_host = mirror_host
     ctx.var.upstream_mirror_uri = mirror_host .. uri
 
     if has_mod then
-        apisix_ngx_client.enable_mirror()
+        apisix_ngx_client.enable_mirror()   -- 调用nginx接口 ngx_http_apisix_enable_mirror
     end
 end
 
@@ -114,7 +117,7 @@ end
 function _M.rewrite(conf, ctx)
     core.log.info("proxy mirror plugin rewrite phase, conf: ", core.json.delay_encode(conf))
 
-    if conf.sample_ratio == 1 then
+    if conf.sample_ratio == 1 then  -- 全部镜像
         enable_mirror(ctx, conf)
         ctx.enable_mirror = true
     else

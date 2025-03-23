@@ -228,6 +228,7 @@ _M.patch = patch
 
 
 -- Compare two tables as if they are sets (only compare the key part)
+-- 比较两个集合是否相等
 function _M.set_eq(a, b)
     if nkeys(a) ~= nkeys(b) then
         return false
@@ -272,6 +273,7 @@ _M.deep_eq = deep_eq
 
 
 -- pick takes the given attributes out of object
+-- 将obj的部分属性attrs组成一个新的table, 返回
 function _M.pick(obj, attrs)
     local data = {}
     for k, v in pairs(obj) do

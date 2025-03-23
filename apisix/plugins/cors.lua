@@ -143,7 +143,8 @@ local schema = {
         },
     }
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/cors/
+-- 处理OPTIONS请求
 local _M = {
     version = 0.1,
     priority = 4000,
@@ -331,7 +332,7 @@ end
 function _M.rewrite(conf, ctx)
     -- save the original request origin as it may be changed at other phase
     ctx.original_request_origin = core.request.header(ctx, "Origin")
-    if ctx.var.request_method == "OPTIONS" then
+    if ctx.var.request_method == "OPTIONS" then -- OPTIONS请求直接返回200
         return 200
     end
 end

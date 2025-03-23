@@ -134,13 +134,13 @@ local function parse_resource_ttl(ctx, cc)
     return max_age and max(max_age, 0) or 0
 end
 
-
+-- 请求是否可以从缓存中获取相应
 local function cacheable_request(conf, ctx, cc)
-    if not util.match_method(conf, ctx) then
+    if not util.match_method(conf, ctx) then   -- 根据conf.cache_method判断该请求是否可以
         return false, "MISS"
     end
 
-    if conf.cache_bypass ~= nil then
+    if conf.cache_bypass ~= nil then  -- 该属性的值不为空或者非 0 时则会跳过缓存检查
         local value = util.generate_complex_value(conf.cache_bypass, ctx)
         core.log.info("proxy-cache cache bypass value:", value)
         if value ~= nil and value ~= "" and value ~= "0" then
@@ -187,7 +187,7 @@ function _M.access(conf, ctx)
 
     if ctx.var.request_method ~= "PURGE" then
         local ret, msg = cacheable_request(conf, ctx, cc)
-        if not ret then
+        if not ret then     -- 不进行缓存
             core.response.set_header("Apisix-Cache-Status", msg)
             return
         end
@@ -201,9 +201,10 @@ function _M.access(conf, ctx)
         }
     end
 
+    -- 实现为ngx_shared 进程间共享内存
     local res, err = ctx.cache.memory:get(ctx.var.upstream_cache_key)
 
-    if ctx.var.request_method == "PURGE" then
+    if ctx.var.request_method == "PURGE" then       --清理缓存
         if err == "not found" then
             return 404
         end
@@ -282,6 +283,7 @@ function _M.header_filter(conf, ctx)
         return
     end
 
+    -- process all request headers received -- (max_headers?, raw?)
     local res_headers = ngx.resp.get_headers(0, true)
 
     for key in pairs(res_headers) do
