@@ -76,27 +76,28 @@ local function slice_batch(batch, n)
     return slice
 end
 
-
+-- 执行传入的批处理函数
 function execute_func(premature, self, batch)
-    if premature then
+    if premature then   -- 如果batch不为空，会导致数据丢失
         return
     end
 
     -- In case of "err" and a valid "first_fail" batch processor considers, all first_fail-1
     -- entries have been successfully consumed and hence reschedule the job for entries with
     -- index first_fail to #entries based on the current retry policy.
-    local ok, err, first_fail = self.func(batch.entries, self.batch_max_size)
-    if not ok then
-        if first_fail then
+    local ok, err, first_fail = self.func(batch.entries, self.batch_max_size)   --执行传入的批处理函数
+    if not ok then      -- 执行失败
+        if first_fail then  -- first_fail为entries中第一个处理失败的元素的索引。first_fail之前的都认为已经处理成功
             core.log.error("Batch Processor[", self.name, "] failed to process entries [",
                             #batch.entries + 1 - first_fail, "/", #batch.entries ,"]: ", err)
-            batch.entries = slice_batch(batch.entries, first_fail)
+            batch.entries = slice_batch(batch.entries, first_fail)  -- 取出从索引first_fail之后的处理失败的元素
         else
             core.log.error("Batch Processor[", self.name,
                            "] failed to process entries: ", err)
         end
 
-        batch.retry_count = batch.retry_count + 1
+        batch.retry_count = batch.retry_count + 1   --记录失败次数
+        -- 如果没超过最大重试次数，进行重试
         if batch.retry_count <= self.max_retry_count and #batch.entries > 0 then
             schedule_func_exec(self, self.retry_delay,
                                batch)
@@ -112,12 +113,13 @@ function execute_func(premature, self, batch)
                    "] successfully processed the entries")
 end
 
-
+--每inactive_timeout秒执行一次
 local function flush_buffer(premature, self)
     if premature then
         return
     end
 
+    -- inactive_timeout不活跃或超过buffer_duration批次还没满
     if now() - self.last_entry_t >= self.inactive_timeout or
        now() - self.first_entry_t >= self.buffer_duration
     then
@@ -136,6 +138,7 @@ end
 
 
 function create_buffer_timer(self)
+    -- inactive_timeout秒后执行一次flush_buffer
     local hdl, err = timer_at(self.inactive_timeout, flush_buffer, self)
     if not hdl then
         core.log.error("failed to create buffer timer: ", err)
@@ -144,7 +147,13 @@ function create_buffer_timer(self)
     self.is_timer_running = true
 end
 
-
+-- func 批处理函数
+-- config:
+--  batch_max_size   --最大批次大小
+--  inactive_timeou  --最新元素在管道里的最长时间
+--  buffer_duration  --最早元素在管道里的最长时间
+--  max_retry_count  --失败重试次数。
+--  retry_delay      --每次失败后，延迟几秒后再次执行
 function batch_processor:new(func, config)
     local ok, err = core.schema.check(schema, config)
     if not ok then
@@ -178,12 +187,13 @@ end
 
 function batch_processor:push(entry)
     -- if the batch size is one then immediately send for processing
-    if self.batch_max_size == 1 then
+    if self.batch_max_size == 1 then        -- 退化为流处理
         local batch = {entries = {entry}, retry_count = 0}
-        schedule_func_exec(self, 0, batch)
+        schedule_func_exec(self, 0, batch)      --创建一个timer去异步执行
         return
     end
 
+    -- prometheus指标统计
     if prometheus and prometheus.get_prometheus() and not batch_metrics and self.name
        and self.route_id and self.server_addr then
         batch_metrics = prometheus.get_prometheus():gauge("batch_process_entries",
@@ -193,20 +203,22 @@ function batch_processor:push(entry)
 
     local entries = self.entry_buffer.entries
     table.insert(entries, entry)
-    set_metrics(self, #entries)
+    set_metrics(self, #entries)     -- prometheus指标统计
 
     if #entries == 1 then
-        self.first_entry_t = now()
+        self.first_entry_t = now()      --本批次最旧元素加入时间
     end
-    self.last_entry_t = now()
+    self.last_entry_t = now()           --本批次最新元素加入时间
 
-    if self.batch_max_size <= #entries then
+    if self.batch_max_size <= #entries then         --攒够一批
         core.log.debug("Batch Processor[", self.name ,
                        "] batch max size has exceeded")
         self:process_buffer()
     end
 
-    if not self.is_timer_running then
+    if not self.is_timer_running then -- 一个实例只会执行一次
+        -- 启动定时检查器，没攒够一批但超过inactive_timeout，也会被当成一批来处理
+        --
         create_buffer_timer(self)
     end
 end
@@ -214,15 +226,16 @@ end
 
 function batch_processor:process_buffer()
     -- If entries are present in the buffer move the entries to processing
+    -- 将当前entry_buffer移到batch_to_process中。batch_to_process的每个元素作为一个批次
     if #self.entry_buffer.entries > 0 then
         core.log.debug("transferring buffer entries to processing pipe line, ",
             "buffercount[", #self.entry_buffer.entries ,"]")
         self.batch_to_process[#self.batch_to_process + 1] = self.entry_buffer
-        self.entry_buffer = {entries = {}, retry_count = 0}
+        self.entry_buffer = {entries = {}, retry_count = 0} --重置entry_buffer
         set_metrics(self, 0)
     end
 
-    for _, batch in ipairs(self.batch_to_process) do
+    for _, batch in ipairs(self.batch_to_process) do        -- 循环处理每批entries
         schedule_func_exec(self, 0, batch)
     end
 

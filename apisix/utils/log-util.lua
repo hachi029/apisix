@@ -40,16 +40,17 @@ local lru_log_format = core.lrucache.new({
 
 local _M = {}
 
-
+-- 读取请求体，如果在内存中，直接读取；如果在磁盘文件，读取本地磁盘
 local function get_request_body(max_bytes)
     local req_body = req_get_body_data()
-    if req_body then
+    if req_body then    --数据在内存里
         if max_bytes and #req_body >= max_bytes then
             req_body = str_sub(req_body, 1, max_bytes)
         end
         return req_body
     end
 
+    -- 数据被写到了磁盘
     local file_name = req_get_body_file()
     if not file_name then
         return nil
@@ -68,7 +69,14 @@ local function get_request_body(max_bytes)
     return req_body
 end
 
-
+--解析json格式的log_format: "log_format": {
+--        "host": "$host",
+--        "@timestamp": "$time_iso8601",
+--        "client_ip": "$remote_addr"
+--    }
+-- 配置完成后，日志格式：
+-- {"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
+--{"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
 local function gen_log_format(format)
     local log_format = {}
     for k, var_name in pairs(format) do
@@ -82,12 +90,12 @@ local function gen_log_format(format)
     return log_format
 end
 
-
+-- 根据log_format返回真实的log
 local function get_custom_format_log(ctx, format, max_req_body_bytes)
     local log_format = lru_log_format(format or "", nil, gen_log_format, format)
     local entry = core.table.new(0, core.table.nkeys(log_format))
     for k, var_attr in pairs(log_format) do
-        if var_attr[1] then
+        if var_attr[1] then -- 标识是否是变量，即是否以$开头
             local key = var_attr[2]
             if key == "request_body" then
                 local max_req_body_bytes = max_req_body_bytes or MAX_REQ_BODY
@@ -100,13 +108,13 @@ local function get_custom_format_log(ctx, format, max_req_body_bytes)
             else
                 entry[k] = ctx.var[var_attr[2]]
             end
-        else
+        else        --字面量
             entry[k] = var_attr[2]
         end
     end
 
     local matched_route = ctx.matched_route and ctx.matched_route.value
-    if matched_route then
+    if matched_route then   --必选的附加字段
         entry.service_id = matched_route.service_id
         entry.route_id = matched_route.id
     end
@@ -122,11 +130,15 @@ function _M.inject_get_custom_format_log(f)
     _M.get_custom_format_log = f
 end
 
-
+-- latency = (ngx_now() - ngx.req.start_time())
+-- upstream_latency = var.upstream_response_time 是nginx提供的变量
+-- apisix_latency = latency - upstream_latency
 local function latency_details_in_ms(ctx)
     local latency = (ngx_now() - ngx.req.start_time()) * 1000
     local upstream_latency, apisix_latency = nil, latency
 
+    -- upstream_response_time可能是多个,分割的字符串，apisix通过
+    -- https://github.com/api7/lua-var-nginx-module 做了预处理
     if ctx.var.upstream_response_time then
         upstream_latency = ctx.var.upstream_response_time * 1000
         apisix_latency = apisix_latency - upstream_latency
@@ -143,7 +155,7 @@ local function latency_details_in_ms(ctx)
 end
 _M.latency_details_in_ms = latency_details_in_ms
 
-
+--组装详细日志，几乎包含了所有
 local function get_full_log(ngx, conf)
     local ctx = ngx.ctx.api_ctx
     local var = ctx.var
@@ -260,7 +272,8 @@ local function is_match(match, ctx)
     return match_result
 end
 
-
+-- build log
+-- log_format = conf.log_format or plugin_metadata.value.log_format
 function _M.get_log_entry(plugin_name, conf, ctx)
     -- If the "match" configuration is set and the matching conditions are not met,
     -- then do not log the message.
@@ -293,7 +306,7 @@ function _M.get_log_entry(plugin_name, conf, ctx)
     return entry, customized
 end
 
-
+-- 获取文本格式的请求报文
 function _M.get_req_original(ctx, conf)
     local data = {
         ctx.var.request, "\r\n"
@@ -314,13 +327,13 @@ end
 
 
 function _M.check_log_schema(conf)
-    if conf.include_req_body_expr then
+    if conf.include_req_body_expr then      -- 请求体expr
         local ok, err = expr.new(conf.include_req_body_expr)
         if not ok then
             return nil, "failed to validate the 'include_req_body_expr' expression: " .. err
         end
     end
-    if conf.include_resp_body_expr then
+    if conf.include_resp_body_expr then     -- 响应体expr
         local ok, err = expr.new(conf.include_resp_body_expr)
         if not ok then
             return nil, "failed to validate the 'include_resp_body_expr' expression: " .. err
@@ -329,11 +342,12 @@ function _M.check_log_schema(conf)
     return true, nil
 end
 
-
+-- 获取响应body，(支持解压缩)
 function _M.collect_body(conf, ctx)
     if conf.include_resp_body then
         local log_response_body = true
 
+        --执行表达式判断是否collect_body
         if conf.include_resp_body_expr then
             if not conf.response_expr then
                 local response_expr, err = expr.new(conf.include_resp_body_expr)
@@ -353,23 +367,27 @@ function _M.collect_body(conf, ctx)
             end
         end
 
+        -- 如果确定要读取响应体
         if log_response_body then
             local max_resp_body_bytes = conf.max_resp_body_bytes or MAX_RESP_BODY
 
+            -- 读取到的响应体已经大于max_resp_body_bytes了
             if ctx._resp_body_bytes and ctx._resp_body_bytes >= max_resp_body_bytes then
                 return
             end
             local final_body = core.response.hold_body_chunk(ctx, true, max_resp_body_bytes)
-            if not final_body then
+            if not final_body then      -- 为nil 表示不是最后一个chunk
                 return
             end
 
+            -- 获取响应体压缩格式
             local response_encoding = ngx_header["Content-Encoding"]
             if not response_encoding then
                 ctx.resp_body = final_body
                 return
             end
 
+            -- 对响应体进行解压缩（gzip/brotli）
             local decoder = content_decode.dispatch_decoder(response_encoding)
             if not decoder then
                 core.log.warn("unsupported compression encoding type: ",
@@ -377,7 +395,7 @@ function _M.collect_body(conf, ctx)
                 ctx.resp_body = final_body
                 return
             end
-
+            -- 解压缩（gzip/brotli）
             local decoded_body, err = decoder(final_body)
             if err ~= nil then
                 core.log.warn("try decode compressed data err: ", err)

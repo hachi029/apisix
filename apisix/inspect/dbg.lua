@@ -24,8 +24,9 @@ local jit = jit
 
 local _M = {}
 
-local hooks = {}
+local hooks = {}    --记录当前仍alive的hook
 
+-- 格式化n
 function _M.getname(n)
     if n.what == "C" then
         return n.name
@@ -38,19 +39,21 @@ function _M.getname(n)
     end
 end
 
+-- _:  event_type: "call", "return", "line", or "count"
+-- arg: line_num
 local function hook(_, arg)
     local level = 2
     local finfo = debug.getinfo(level, "nSlf")
     local key = finfo.source .. "#" .. arg
 
-    local hooks2 = {}
-    local removed_hooks = {}
-    for _, hook in ipairs(hooks) do
+    local hooks2 = {}               -- 代表需要保留的hook
+    local removed_hooks = {}        -- 代表一次性执行的hoot
+    for _, hook in ipairs(hooks) do     -- 遍历每个hook
         if key:sub(-#hook.key) == hook.key then
             local filter_func = hook.filter_func
             local info = {finfo = finfo, uv = {}, vals = {}}
 
-            -- upvalues
+            -- upvalues     -- 正在执行的函数的upvalues
             local i = 1
             while true do
                 local name, value = debug.getupvalue(finfo.func, i)
@@ -61,7 +64,7 @@ local function hook(_, arg)
                 i = i + 1
             end
 
-            -- local values
+            -- local values     -- 正在执行的函数的内部变量
             local i = 1
             while true do
                 local name, value = debug.getlocal(level, i)
@@ -72,14 +75,15 @@ local function hook(_, arg)
                 i = i + 1
             end
 
-            local r1, r2_or_err = pcall(filter_func, info)
+            -- filter_func returns true of false to determine whether the breakpoint is one-shot breakpoint
+            local r1, r2_or_err = pcall(filter_func, info)      --调用filter_func
             if not r1 then
                 core.log.error("inspect: pcall filter_func:", r2_or_err)
                 table_insert(removed_hooks, hook)
-            elseif r2_or_err == false then
+            elseif r2_or_err == false then  -- trigger every time
                 -- if filter_func returns false, keep the hook
                 table_insert(hooks2, hook)
-            else
+            else    -- one-shot
                 table_insert(removed_hooks, hook)
             end
         else
@@ -95,7 +99,7 @@ local function hook(_, arg)
     -- disable debug mode if all hooks done
     if #hooks2 ~= #hooks then
         hooks = hooks2
-        if #hooks == 0 then
+        if #hooks == 0 then     --表示已经没有active的hoot了
             core.log.warn("inspect: all hooks removed")
             debug.sethook()
             if jit then
@@ -105,6 +109,10 @@ local function hook(_, arg)
     end
 end
 
+-- file: 如/usr/local/apisix/apisix/init.lua
+-- line: line_num
+-- func : require("apisix").http_access_phase
+-- filter_func: 执行到指定方法指定行后，触发filter_func
 function _M.set_hook(file, line, func, filter_func)
     if file == nil then
         file = "=stdin"
@@ -118,9 +126,11 @@ function _M.set_hook(file, line, func, filter_func)
         jit.off()
     end
 
+    -- https://www.lua.org/pil/23.2.html l: every_line
     debug.sethook(hook, "l")
 end
 
+-- 取消hook, 从hooks中移除
 function _M.unset_hook(file, line)
     if file == nil then
         file = "=stdin"
@@ -146,6 +156,7 @@ function _M.unset_hook(file, line)
     end
 end
 
+-- 清空所有的hook
 function _M.unset_all()
     if #hooks > 0 then
         hooks = {}
@@ -156,6 +167,7 @@ function _M.unset_all()
     end
 end
 
+-- 返回仍存活的hook
 function _M.hooks()
     return hooks
 end

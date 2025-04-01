@@ -26,6 +26,7 @@ local log          = require("apisix.core.log")
 local json         = require("apisix.core.json")
 local config_local = require("apisix.core.config_local")
 local tablepool    = require("tablepool")
+-- https://github.com/api7/lua-var-nginx-module 性能更高
 local get_var      = require("resty.ngxvar").fetch
 local get_request  = require("resty.ngxvar").request
 local ck           = require "resty.cookie"
@@ -221,8 +222,16 @@ do
     }
 
     local mt = {
+        -- 高性能原因：resty.ngxvar库和cached
+        -- cookie_:  resty.cookie 库来读取
+        -- arg_: request.get_uri_args()[arg_key]
+        -- post_arg_: request.get_post_args()[arg_key]
+        -- uri_param_: 路由里的uri参数 _ctx.curr_req_matched[arg_key]
+        -- http_: resty.ngxvar 来读取
         __index = function(t, key)
-            local cached = t._cache[key]
+            -- https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxvarvariable
+            -- when you need to read from an Nginx variable repeatedly in your Lua code, cache the Nginx variable value to your own Lua variable
+            local cached = t._cache[key]        -- ctx 缓存
             if cached ~= nil then
                 return cached
             end
@@ -232,7 +241,7 @@ do
             end
 
             local val
-            local method = var_methods[key]
+            local method = var_methods[key]  -- key 为cookie 或 method
             if method then
                 val = method()
 

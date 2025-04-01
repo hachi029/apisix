@@ -144,7 +144,8 @@ local schema = {
     minProperties = 1,
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/proxy-rewrite/
+-- 支持对 scheme、uri、host 等信息进行重写。
 local _M = {
     version  = 0.1,
     priority = 1008,
@@ -269,12 +270,14 @@ do
 
 
 function _M.rewrite(conf, ctx)
+    -- 对upstream_names几个相关参数进行重新 host、upgrade、connection
     for _, name in ipairs(upstream_names) do
         if conf[name] then
             ctx.var[upstream_vars[name]] = conf[name]
         end
     end
 
+    -- upstream_uri 重写，支持nginx变量
     local upstream_uri = ctx.var.uri
     local separator_escaped = false
     if conf.use_real_request_uri_unsafe then
@@ -285,6 +288,8 @@ function _M.rewrite(conf, ctx)
         separator_escaped = true
         upstream_uri = core.utils.resolve_var(conf.uri, ctx.var, escape_separator)
 
+    --奇数索引的元素代表匹配来自客户端请求的 uri 正则表达式，偶数索引的元素代表匹配成功后转发到上游的 uri 模板
+    --正则匹配与替换
     elseif conf.regex_uri ~= nil then
         if not str_find(upstream_uri, "?") then
             separator_escaped = true
@@ -322,6 +327,7 @@ function _M.rewrite(conf, ctx)
         end
     end
 
+    -- 对url进行safe_encode
     if not conf.use_real_request_uri_unsafe then
         local index
         if separator_escaped then
@@ -352,6 +358,7 @@ function _M.rewrite(conf, ctx)
         ctx.var.upstream_uri = upstream_uri
     end
 
+    -- header重写 {add={},set={},remove={}}
     if conf.headers then
         local hdr_op, err = core.lrucache.plugin_ctx(lrucache, ctx, nil,
                                     create_header_operation, conf.headers)

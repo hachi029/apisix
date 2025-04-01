@@ -49,7 +49,9 @@ local schema = {
 
 local plugin_name = "real-ip"
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/real-ip/
+-- 用于动态改变传递到 Apache APISIX 的客户端的 IP 地址和端口，
+-- 工作方式和 NGINX 中的 ngx_http_realip_module 模块一样，并且更加灵活
 local _M = {
     version = 0.1,
     priority = 23000,
@@ -88,7 +90,7 @@ end
 
 
 local function get_addr(conf, ctx)
-    if conf.source == "http_x_forwarded_for" then
+    if conf.source == "http_x_forwarded_for" then       -- 从http_x_forwarded_for头中获取real_ip
         -- use the last address from X-Forwarded-For header
         -- after core.request.header function changed
         -- we need to get original header value by using core.request.headers
@@ -97,27 +99,27 @@ local function get_addr(conf, ctx)
             return nil
         end
 
-        if type(addrs) == "table" then
+        if type(addrs) == "table" then      -- 如果存在多个X-Forwarded-For 头，使用最后一个
             addrs = addrs[#addrs]
         end
 
-        local idx = core.string.rfind_char(addrs, ",")
+        local idx = core.string.rfind_char(addrs, ",")      --找到最右边的,
         if not idx then
             return addrs
         end
 
         if conf.recursive and conf.trusted_addresses then
             local split_addrs = ngx_re_split(addrs, ",\\s*", "jo")
-            for i = #split_addrs, 2, -1 do
-                if not addr_match(conf, ctx, split_addrs[i]) then
+            for i = #split_addrs, 2, -1 do      -- 从右往左遍历，直到第二个元素
+                if not addr_match(conf, ctx, split_addrs[i]) then       --直到找到第一个非受信的ip作为real_ip
                     return split_addrs[i]
                 end
             end
 
-            return split_addrs[1]
+            return split_addrs[1]   -- 返回第一个
         end
 
-        for i = idx + 1, #addrs do
+        for i = idx + 1, #addrs do      -- 返回最右边的ip
             if str_byte(addrs, i) == str_byte(" ") then
                 idx = idx + 1
             else
@@ -127,7 +129,7 @@ local function get_addr(conf, ctx)
 
         return str_sub(addrs, idx + 1)
     end
-    return ctx.var[conf.source]
+    return ctx.var[conf.source]     --从配置的变量中获取real_ip
 end
 
 
@@ -139,7 +141,7 @@ function _M.rewrite(conf, ctx)
 
     if conf.trusted_addresses then
         local remote_addr = ctx.var.remote_addr
-        if not addr_match(conf, ctx, remote_addr) then
+        if not addr_match(conf, ctx, remote_addr) then  --不是受信任的ip，直接返回
             return
         end
     end
@@ -156,7 +158,7 @@ function _M.rewrite(conf, ctx)
         return
     end
 
-    if str_byte(ip, 1, 1) == str_byte("[") then
+    if str_byte(ip, 1, 1) == str_byte("[") then     -- ipv6
         -- For IPv6, the `set_real_ip` accepts '::1' but not '[::1]'
         ip = str_sub(ip, 2, #ip - 1)
     end
@@ -168,7 +170,7 @@ function _M.rewrite(conf, ctx)
 
     core.log.info("set real ip: ", ip, ", port: ", port)
 
-    local ok, err = client.set_real_ip(ip, port)
+    local ok, err = client.set_real_ip(ip, port)        --调用nginx的方法
     if not ok then
         core.log.error("failed to set real ip: ", err)
         return

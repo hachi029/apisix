@@ -87,7 +87,8 @@ local schema = {
     },
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/brotli/
+-- 动态的设置 Nginx 中的 brotli 的行为。
 local _M = {
     version = 0.1,
     priority = 996,
@@ -158,7 +159,7 @@ function _M.header_filter(conf, ctx)
         return
     end
 
-    local allow_encoding = check_accept_encoding(ctx)
+    local allow_encoding = check_accept_encoding(ctx)   --通过请求头判断客户端是否支持brotli的压缩格式
     if not allow_encoding then
         return
     end
@@ -176,7 +177,7 @@ function _M.header_filter(conf, ctx)
         return
     end
 
-    if type(types) == "table" then
+    if type(types) == "table" then      -- 响应头content_type与配置的types匹配
         local matched = false
         local from = core.string.find(content_type, ";")
         if from then
@@ -195,6 +196,7 @@ function _M.header_filter(conf, ctx)
         end
     end
 
+    -- content_length 匹配
     local content_length = tonumber(ngx_header["Content-Length"])
     if content_length then
         local min_length = conf.min_length
@@ -204,15 +206,18 @@ function _M.header_filter(conf, ctx)
         -- Like Nginx, don't check min_length if Content-Length is missing
     end
 
+    -- http_version 匹配
     local http_version = req_http_version()
     if http_version < conf.http_version then
         return
     end
 
+    -- vary， 避免缓存问题
     if conf.vary then
         core.response.add_header("Vary", "Accept-Encoding")
     end
 
+    -- 创建compressor
     local compressor = create_brotli_compressor(conf.mode, conf.comp_level,
                                                 conf.lgwin, conf.lgblock)
     if not compressor then
@@ -228,7 +233,7 @@ end
 
 
 function _M.body_filter(conf, ctx)
-    if not ctx.brotli_matched then
+    if not ctx.brotli_matched then      -- 未命中压缩条件，直接返回
         return
     end
 

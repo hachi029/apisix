@@ -63,6 +63,8 @@ local schema = {
 
 local plugin_name = "ua-restriction"
 
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ua-restriction/
+-- 设置UA黑名单或白名单，阻止爬虫。allowlist 和 denylist 不可以同时启用
 local _M = {
     version = 0.1,
     priority = 2999,

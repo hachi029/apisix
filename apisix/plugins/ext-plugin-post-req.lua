@@ -19,9 +19,11 @@ local ext = require("apisix.plugins.ext-plugin.init")
 
 
 local name = "ext-plugin-post-req"
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ext-plugin-post-req/
+-- 内置 Lua 插件执行之后且在请求到达上游之前工作。 执行于access阶段
 local _M = {
     version = 0.1,
-    priority = -3000,
+    priority = -3000,       -- 一个比较小的优先级
     name = name,
     schema = ext.schema,
 }

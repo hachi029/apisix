@@ -27,7 +27,7 @@ local schema = {
     properties = {},
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/inspect/
 local _M = {
     version = 0.1,
     priority = 200,
@@ -40,7 +40,7 @@ function _M.check_schema(conf, schema_type)
     return core.schema.check(schema, conf)
 end
 
-
+--  set arbitrary breakpoint in any Lua file to inspect the context information
 function _M.init()
     local attr = plugin.plugin_attr(plugin_name)
     local delay

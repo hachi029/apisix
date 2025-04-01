@@ -50,7 +50,9 @@ if not internal_status then
     error("lua_shared_dict \"internal-status\" not configured")
 end
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/server-info/
+-- 定期将服务基本信息上报至 etcd。
+-- boot_time/id/etcd_version/version/hostname
 local _M = {
     version = 0.1,
     priority = 990,
@@ -59,7 +61,7 @@ local _M = {
     scope = "global",
 }
 
-
+-- 服务启动时间
 local function get_boot_time()
     local time, err = internal_status:get("server_info:boot_time")
     if err ~= nil then
@@ -91,7 +93,7 @@ local function uninitialized_server_info()
     }
 end
 
-
+-- get server_info
 local function get()
     local data, err = internal_status:get("server_info")
     if err ~= nil then
@@ -123,7 +125,7 @@ local function get_server_info()
     return 200, info
 end
 
-
+-- 向etcd中写入server_info
 local function set(key, value, ttl)
     local res_new, err = core.etcd.set(key, value, ttl)
     if not res_new then
@@ -148,7 +150,7 @@ local function set(key, value, ttl)
     return true
 end
 
-
+-- 在特权进程中每report_ttl/2 秒执行一次
 local function report(premature, report_ttl)
     if premature then
         return
@@ -161,6 +163,7 @@ local function report(premature, report_ttl)
         return
     end
 
+    -- 初始化etcd_version
     if server_info.etcd_version == "unknown" then
         local res, err = core.etcd.server_version()
         if not res then
@@ -180,6 +183,7 @@ local function report(premature, report_ttl)
         end
     end
 
+    -- server_info在etcd的存储位置
     -- get inside etcd data, if not exist, create it
     local key = "/data_plane/server_info/" .. server_info.id
     local res, err = core.etcd.get(key)
@@ -188,6 +192,7 @@ local function report(premature, report_ttl)
         return
     end
 
+    -- 如果不存在，set
     if not res.body.node then
         local ok, err = set(key, server_info, report_ttl)
         if not ok then
@@ -200,7 +205,7 @@ local function report(premature, report_ttl)
 
     local ok = core.table.deep_eq(server_info, res.body.node.value)
     -- not equal, update it
-    if not ok then
+    if not ok then   -- 如果和etcd中存储的不相同
         local ok, err = set(key, server_info, report_ttl)
         if not ok then
             core.log.error("failed to set server_info to etcd: ", err)
@@ -210,6 +215,7 @@ local function report(premature, report_ttl)
         return
     end
 
+    --lease_id 是第一次从etcd的响应中取出的
     -- get lease_id from ngx dict
     lease_id, err = internal_status:get("lease_id")
     if not lease_id then
@@ -217,6 +223,7 @@ local function report(premature, report_ttl)
         return
     end
 
+    -- 应该是连接保活？
     -- call keepalive
     local res, err = core.etcd.keepalive(lease_id)
     if not res then
@@ -247,7 +254,7 @@ function _M.check_schema(conf)
     return true
 end
 
-
+-- 暴露control_api
 function _M.control_api()
     return {
         {
@@ -258,7 +265,8 @@ function _M.control_api()
     }
 end
 
-
+-- report_ttl etcd 中服务信息保存的 TTL
+-- 向特权进程注册上报任务
 function _M.init()
     if core.config ~= require("apisix.core.config_etcd") then
         -- we don't need to report server info if etcd is not in use.
@@ -281,9 +289,11 @@ function _M.init()
         return
     end
 
+    -- etcd 中服务信息保存的 TTL
     local report_ttl = attr and attr.report_ttl or default_report_ttl
     local start_at = ngx_time()
 
+    -- 每隔report_ttl/2 上报一次
     local fn = function()
         local now = ngx_time()
         -- If ttl remaining time is less than half, then flush the ttl
@@ -293,14 +303,16 @@ function _M.init()
         end
     end
 
+    -- 只有一个worker会上报
     if ngx_worker_id() == 0 then
-        local ok, err = ngx_timer_at(0, report, report_ttl)
+        local ok, err = ngx_timer_at(0, report, report_ttl)     --先执行一次
         if not ok then
             core.log.error("failed to create initial timer to report server info: ", err)
             return
         end
     end
 
+    -- 放到特权进程中执行
     timers.register_timer("plugin#server-info", fn, true)
 
     core.log.info("timer update the server info ttl, current ttl: ", report_ttl)

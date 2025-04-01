@@ -68,7 +68,8 @@ local schema = {
     required = {"uri"}
 }
 
-
+--https://apisix.apache.org/zh/docs/apisix/plugins/forward-auth/
+--
 local _M = {
     version = 0.1,
     priority = 2002,

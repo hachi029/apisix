@@ -14,6 +14,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
+-- https://github.com/openresty/lua-resty-limit-traffic/blob/master/lib/resty/limit/req.md
 local limit_req_new                     = require("resty.limit.req").new
 local core                              = require("apisix.core")
 local redis_schema                      = require("apisix.utils.redis-schema")
@@ -84,7 +85,8 @@ local schema = {
     }
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/limit-req/
+-- 使用漏桶算法限制单个客户端对服务的请求速率
 local _M = {
     version = 0.1,
     priority = 1001,
@@ -127,15 +129,17 @@ function _M.access(conf, ctx)
                                               create_limit_obj, conf)
     if not lim then
         core.log.error("failed to instantiate a resty.limit.req object: ", err)
-        if conf.allow_degradation then
+        if conf.allow_degradation then      --允许降级
             return
         end
         return 500
     end
 
+    -- key ["remote_addr", "server_addr", "http_x_real_ip", "http_x_forwarded_for", "consumer_name"]
     local conf_key = conf.key
     local key
-    if conf.key_type == "var_combination" then
+    -- key_type ["var", "var_combination"]
+    if conf.key_type == "var_combination" then  --包含nginx多个变量
         local err, n_resolved
         key, err, n_resolved = core.utils.resolve_var(conf_key, ctx.var)
         if err then
@@ -156,6 +160,7 @@ function _M.access(conf, ctx)
         key = ctx.var["remote_addr"]
     end
 
+    -- key: remote_addr; conf_type: route; conf_version: conf_modify_index
     key = key .. ctx.conf_type .. ctx.conf_version
     core.log.info("limit key: ", key)
 

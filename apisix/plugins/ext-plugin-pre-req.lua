@@ -19,9 +19,12 @@ local ext = require("apisix.plugins.ext-plugin.init")
 
 
 local name = "ext-plugin-pre-req"
+
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ext-plugin-pre-req/
+-- 外部插件，在执行内置 Lua 插件之前执行。 rewrite阶段
 local _M = {
     version = 0.1,
-    priority = 12000,
+    priority = 12000,       -- 一个比大多数插件优先级高的值
     name = name,
     schema = ext.schema,
 }

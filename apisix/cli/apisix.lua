@@ -35,6 +35,6 @@ package.path  = pkg_path_deps .. pkg_path_org .. pkg_path_env
 
 -- pass path to construct the final result
 local env = require("apisix.cli.env")(apisix_home, pkg_cpath_org, pkg_path_org)
-local ops = require("apisix.cli.ops")
+local ops = require("apisix.cli.ops")   -- 实现了apisix的相关命令
 
 ops.execute(env, arg)

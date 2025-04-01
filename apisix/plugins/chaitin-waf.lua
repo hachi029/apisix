@@ -144,7 +144,7 @@ local metadata_schema = {
     },
     required = { "nodes" },
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/chaitin-waf/
 local _M = {
     version = 0.1,
     priority = 2700,
@@ -201,7 +201,7 @@ local function get_healthy_chaitin_server_nodes(metadata, checker)
     return new_nodes
 end
 
-
+-- 使用roundrobin负载均衡
 local function get_chaitin_server(metadata, ctx)
     if not global_server_picker or global_server_picker.upstream ~= metadata.value.nodes then
         local up_nodes = get_healthy_chaitin_server_nodes(metadata.value)
@@ -278,7 +278,7 @@ end
 local function do_access(conf, ctx)
     local extra_headers = {}
 
-    local match, err = check_match(conf, ctx)
+    local match, err = check_match(conf, ctx)       -- 执行一系列expr判断是否需要往waf转发
     if not match then
         if err then
             extra_headers[HEADER_CHAITIN_WAF] = "err"
@@ -297,6 +297,7 @@ local function do_access(conf, ctx)
         return 500, nil, extra_headers
     end
 
+    --使用roundrobin负载均衡算法选择一个waf节点
     local host, port, err = get_chaitin_server(metadata, ctx)
     if err then
         extra_headers[HEADER_CHAITIN_WAF] = "unhealthy"
@@ -307,6 +308,7 @@ local function do_access(conf, ctx)
 
     core.log.info("picked chaitin-waf server: ", host, ":", port)
 
+    -- 超时时间等相关配置
     local t = get_conf(conf, metadata.value)
     t.host = host
     t.port = port
@@ -366,6 +368,8 @@ end
 
 
 function _M.header_filter(conf, ctx)
+    -- https://github.com/chaitin/lua-resty-t1k
+    -- 长亭的lua SDK
     t1k.do_header_filter()
 end
 

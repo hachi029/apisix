@@ -32,7 +32,8 @@ local schema = {
     }
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/request-validation/
+--  JSON Schema 提前验证向上游服务转发的请求，包含 body 及 header
 local _M = {
     version = 0.1,
     priority = 2800,
@@ -69,7 +70,7 @@ end
 function _M.rewrite(conf, ctx)
     local headers = core.request.headers(ctx)
 
-    if conf.header_schema then
+    if conf.header_schema then      --check headers
         local ok, err = core.schema.check(conf.header_schema, headers)
         if not ok then
             core.log.error("req schema validation failed", err)
@@ -77,7 +78,7 @@ function _M.rewrite(conf, ctx)
         end
     end
 
-    if conf.body_schema then
+    if conf.body_schema then        --check body
         local req_body
         local body, err = core.request.get_body()
         if not body then

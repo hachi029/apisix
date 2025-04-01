@@ -21,7 +21,9 @@ local get_services = require("apisix.http.service").services
 local cached_router_version
 local cached_service_version
 
-
+-- 与radixtree_uri.lua 没大的区别，只是创建uri_router时，with_parameter传入了true
+-- with_parameter 指的是/users/:userId 这个种格式的匹配, 可以从 opts.matched.parameter-name中取出userId
+--  paths = {"/user/:user"}, -- for `/user/john`, `opts.matched.user` will be `john`
 local _M = {}
 
 

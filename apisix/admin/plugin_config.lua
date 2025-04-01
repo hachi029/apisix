@@ -39,7 +39,7 @@ end
 
 
 local function delete_checker(id)
-    local routes, routes_ver = get_routes()
+    local routes, routes_ver = get_routes()     -- 只有route上支持配置 plugin_config_id
     if routes_ver and routes then
         for _, route in ipairs(routes) do
             if type(route) == "table" and route.value

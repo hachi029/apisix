@@ -108,7 +108,9 @@ local status_rel = {
     ["15"] = 500,   -- DATA_LOSS
     ["16"] = 401,   -- UNAUTHENTICATED
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/grpc-transcode/
+-- 使用 grpc-transcode 插件可以在 HTTP 和 gRPC 请求之间进行转换。
+-- HTTP 请求后，首先对请求进行转码，并将转码后的请求转发到 gRPC 服务，获取响应并以 HTTP 格式将其返回给客户端。
 local _M = {
     version = 0.1,
     priority = 506,

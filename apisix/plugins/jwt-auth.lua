@@ -119,7 +119,8 @@ local consumer_schema = {
     required = {"key"},
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/jwt-auth/
+-- 可以设置从header/query/cookie中取出token
 local _M = {
     version = 0.1,
     priority = 2510,

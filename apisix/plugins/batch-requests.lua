@@ -23,7 +23,8 @@ local pairs     = pairs
 local str_find  = core.string.find
 local str_lower = string.lower
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/batch-requests/
+-- 将多个请求请求参数(request_line/headers/body)放到请求体中，多个请求的响应(status_line/headers/body)也会被放到响应体中
 local plugin_name = "batch-requests"
 
 local default_uri = "/apisix/batch-requests"
@@ -209,7 +210,51 @@ local function set_common_query(data)
     end
 end
 
-
+---'request {
+--    "headers": {
+--        "Content-Type": "application/json",
+--        "admin-jwt":"xxxx"
+--    },
+--    "timeout": 500,
+--    "pipeline": [
+--        {
+--            "method": "POST",
+--            "path": "/community.GiftSrv/GetGifts",
+--            "body": "test"
+--        },
+--        {
+--            "method": "POST",
+--            "path": "/community.GiftSrv/GetGifts",
+--            "body": "test2"
+--        }
+--    ]
+--}'
+--- response: [
+--  {
+--    "status": 200,
+--    "reason": "OK",
+--    "body": "{\"ret\":500,\"msg\":\"error\",\"game_info\":null,\"gift\":[],\"to_gets\":0,\"get_all_msg\":\"\"}",
+--    "headers": {
+--      "Connection": "keep-alive",
+--      "Date": "Sat, 11 Apr 2020 17:53:20 GMT",
+--      "Content-Type": "application/json",
+--      "Content-Length": "81",
+--      "Server": "APISIX web server"
+--    }
+--  },
+--  {
+--    "status": 200,
+--    "reason": "OK",
+--    "body": "{\"ret\":500,\"msg\":\"error\",\"game_info\":null,\"gift\":[],\"to_gets\":0,\"get_all_msg\":\"\"}",
+--    "headers": {
+--      "Connection": "keep-alive",
+--      "Date": "Sat, 11 Apr 2020 17:53:20 GMT",
+--      "Content-Type": "application/json",
+--      "Content-Length": "81",
+--      "Server": "APISIX web server"
+--    }
+--  }
+--]
 local function batch_requests(ctx)
     local metadata = plugin.plugin_metadata(plugin_name)
     core.log.info("metadata: ", core.json.delay_encode(metadata))
@@ -247,7 +292,7 @@ local function batch_requests(ctx)
 
     local httpc = http.new()
     httpc:set_timeout(data.timeout)
-    local ok, err = httpc:connect("127.0.0.1", ngx.var.server_port)
+    local ok, err = httpc:connect("127.0.0.1", ngx.var.server_port) --重新向自己发起请求
     if not ok then
         return 500, {error_msg = "connect to apisix failed: " .. err}
     end
@@ -255,7 +300,7 @@ local function batch_requests(ctx)
     ensure_header_lowercase(data)
     set_common_header(data)
     set_common_query(data)
-
+    -- https://github.com/ledgetech/lua-resty-http?tab=readme-ov-file#request_pipeline
     local responses, err = httpc:request_pipeline(data.pipeline)
     if not responses then
         return 400, {error_msg = "request failed: " .. err}
@@ -289,7 +334,7 @@ local function batch_requests(ctx)
     return 200, aggregated_resp
 end
 
-
+-- 对外暴露api /apisix/batch-requests
 function _M.api()
     local uri = default_uri
     local attr = plugin.plugin_attr(plugin_name)

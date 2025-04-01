@@ -67,7 +67,8 @@ local metadata_schema = {
     },
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/http-logger/
+-- 将 APISIX 的日志数据推送到 HTTP 或 HTTPS 服务器
 local _M = {
     version = 0.1,
     priority = 410,
@@ -168,6 +169,7 @@ end
 
 
 function _M.log(conf, ctx)
+    -- 通过plugin_name查看plugin_meta是否配置了log_format
     local entry = log_util.get_log_entry(plugin_name, conf, ctx)
 
     if not entry.route_id then
@@ -179,6 +181,7 @@ function _M.log(conf, ctx)
     end
 
     -- Generate a function to be executed by the batch processor
+    -- format_log to string and send to httpserver
     local func = function(entries, batch_max_size)
         local data, err
 

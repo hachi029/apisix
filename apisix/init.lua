@@ -80,9 +80,11 @@ local has_mod, apisix_ngx_client = pcall(require, "resty.apisix.client")
 
 local _M = {version = 0.4}
 
-
+-- init_by_lua
 function _M.http_init(args)
+    --初始化dns解析
     core.resolver.init_resolver(args)
+    --自动生成admin-key和conf/apisix.uid
     core.id.init()
     core.env.init()
 
@@ -92,6 +94,7 @@ function _M.http_init(args)
         core.log.error("failed to enable privileged_agent: ", err)
     end
 
+    -- core.config.config_etcd.init 尝试连接并读取etcd
     if core.config.init then
         local ok, err = core.config.init()
         if not ok then
@@ -102,7 +105,7 @@ function _M.http_init(args)
     xrpc.init()
 end
 
-
+-- init_worker_by_lua
 function _M.http_init_worker()
     local seed, err = core.utils.get_seed_from_urandom()
     if not seed then
@@ -121,9 +124,9 @@ function _M.http_init_worker()
     end
     require("apisix.balancer").init_worker()
     load_balancer = require("apisix.balancer")
-    require("apisix.admin.init").init_worker()
+    require("apisix.admin.init").init_worker()      --admin-api 初始化，admin-api监听在专门的一个端口
 
-    require("apisix.timers").init_worker()
+    require("apisix.timers").init_worker()  --启动background timer。仅特权进程启用
 
     require("apisix.debug").init_worker()
 
@@ -229,23 +232,26 @@ local function fetch_ctx()
     return ctx
 end
 
-
+-- 解析route上的域名
 local function parse_domain_in_route(route)
     local nodes = route.value.upstream.nodes
+    -- 遍历nodes, 如果某个node是域名，则将其解析为ip
     local new_nodes, err = upstream_util.parse_domain_for_nodes(nodes)
     if not new_nodes then
         return nil, err
     end
 
     local up_conf = route.dns_value and route.dns_value.upstream
+    -- 比较new_nodes 与up_conf是否相同，比较字段 包括host", "port", "weight", "priority", "metadata"
     local ok = upstream_util.compare_upstream_node(up_conf, new_nodes)
-    if ok then
+    if ok then -- same
         return route
     end
 
     -- don't modify the modifiedIndex to avoid plugin cache miss because of DNS resolve result
     -- has changed
 
+    -- 不一样，更新new_nodes
     route.dns_value = core.table.deepcopy(route.value, { shallows = { "self.upstream.parent"}})
     route.dns_value.upstream.nodes = new_nodes
     core.log.info("parse route which contain domain: ",
@@ -433,7 +439,7 @@ local function normalize_uri_like_servlet(uri)
     return core.table.concat(segs, '/')
 end
 
-
+-- 同时执行全局插件和路由插件
 local function common_phase(phase_name)
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -460,6 +466,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         up_id = api_ctx.upstream_id
     end
 
+    -- 如果router上配置了upstream_id
     if up_id then
         local upstream = apisix_upstream.get_by_id(up_id)
         if not upstream then
@@ -473,6 +480,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         api_ctx.matched_upstream = upstream
 
     else
+        -- 如果route上配置的是域名
         if route.has_domain then
             local err
             route, err = parse_domain_in_route(route)
@@ -489,9 +497,10 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 
         api_ctx.matched_upstream = (route.dns_value and
                                     route.dns_value.upstream)
-                                   or route_val.upstream
+                                   or route_val.upstream -- 如果是route上内嵌的upstream
     end
 
+    --ssl 相关
     if api_ctx.matched_upstream and api_ctx.matched_upstream.tls and
         api_ctx.matched_upstream.tls.client_cert_id then
 
@@ -515,6 +524,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         api_ctx.upstream_ssl = upstream_ssl
     end
 
+    -- websocket相关头部
     if enable_websocket then
         api_ctx.var.upstream_upgrade    = api_ctx.var.http_upgrade
         api_ctx.var.upstream_connection = api_ctx.var.http_connection
@@ -524,16 +534,19 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
     -- load balancer is not required by kafka upstream, so the upstream
     -- node selection process is intercepted and left to kafka to
     -- handle on its own
+    -- kafka代理
     if api_ctx.matched_upstream and api_ctx.matched_upstream.scheme == "kafka" then
         return pubsub_kafka.access(api_ctx)
     end
 
+    -- 处理服务发现； 如果node个数>1, 创建健康检查器
     local code, err = set_upstream(route, api_ctx)
     if code then
         core.log.error("failed to set upstream: ", err)
         core.response.exit(code)
     end
 
+    -- load_balancer 是一个load_balancer管理器
     local server, err = load_balancer.pick_server(route, api_ctx)
     if not server then
         core.log.error("failed to pick server: ", err)
@@ -542,9 +555,12 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 
     api_ctx.picked_server = server
 
+    -- 设置往upstream转发的请求头
+    -- x_forwarded_proto x_forwarded_host x_forwarded_port
     set_upstream_headers(api_ctx, server)
 
     -- run the before_proxy method in access phase first to avoid always reinit request
+    -- common_phase: 同时执行 plugin和global_rules
     common_phase("before_proxy")
 
     local up_scheme = api_ctx.upstream_scheme
@@ -581,6 +597,7 @@ function _M.http_access_phase()
     debug.dynamic_debug(api_ctx)
 
     local uri = api_ctx.var.uri
+    -- if里边的逻辑主要是根据配置对uri格式化
     if local_conf.apisix then
         if local_conf.apisix.delete_uri_tail_slash then
             if str_byte(uri, #uri) == str_byte("/") then
@@ -607,14 +624,20 @@ function _M.http_access_phase()
     -- record the normalized but not rewritten uri as request_uri,
     -- the original request_uri can be accessed via var.real_request_uri
     api_ctx.var.real_request_uri = api_ctx.var.request_uri
+    --is_args是nginx变量: “?” if a request line has arguments, or an empty string otherwise.
+    -- args arguments in the request line
     api_ctx.var.request_uri = api_ctx.var.uri .. api_ctx.var.is_args .. (api_ctx.var.args or "")
 
+    -- 执行路由匹配
     router.router_http.match(api_ctx)
 
     local route = api_ctx.matched_route
     if not route then
         -- run global rule when there is no matching route
+        -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
+        -- 一个global_rule可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
         local global_rules = apisix_global_rules.global_rules()
+        -- 对于404的请求执行全局插件。如果phase_name=nil, 会执行插件的rewrite和access方法
         plugin.run_global_rules(api_ctx, global_rules, nil)
 
         core.log.info("not find any matched route")
@@ -627,6 +650,9 @@ function _M.http_access_phase()
 
     local enable_websocket = route.value.enable_websocket
 
+    -- plugin_config_id， 合并plugin_config配置 route.plugins合并plugin_config
+    -- https://apisix.apache.org/zh/docs/apisix/terminology/plugin-config/
+    -- Plugin Config 属于一组通用插件配置的抽象, 包含多个插件配置 {"plugins":{"key-auth":{...}, "rate-limit":{...}}}
     if route.value.plugin_config_id then
         local conf = plugin_config.get(route.value.plugin_config_id)
         if not conf then
@@ -635,17 +661,18 @@ function _M.http_access_phase()
             return core.response.exit(503)
         end
 
-        route = plugin_config.merge(route, conf)
+        -- conf: plugin_config_confs
+        route = plugin_config.merge(route, conf) -- 返回的还是入参 route
     end
 
-    if route.value.service_id then
+    if route.value.service_id then               -- 如果route上关联了service_id；rote上不能内嵌service
         local service = service_fetch(route.value.service_id)
         if not service then
             core.log.error("failed to fetch service configuration by ",
                            "id: ", route.value.service_id)
             return core.response.exit(404)
         end
-
+        -- route.plugins合并service上配置的plugin，service上的upstream也会进行合并
         route = plugin.merge_service_route(service, route)
         api_ctx.matched_route = route
         api_ctx.conf_type = "route&service"
@@ -668,8 +695,11 @@ function _M.http_access_phase()
 
     -- run global rule
     local global_rules = apisix_global_rules.global_rules()
-    plugin.run_global_rules(api_ctx, global_rules, nil)
+    plugin.run_global_rules(api_ctx, global_rules, nil) -- 会执行插件的rewrite和access方法
 
+    --执行route上配置的script https://apisix.apache.org/zh/docs/apisix/terminology/script/
+    -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，
+    -- Route 上配置的 Plugin 将不被执行。
     if route.value.script then
         script.load(route, api_ctx)
         script.run("access", api_ctx)
@@ -679,11 +709,11 @@ function _M.http_access_phase()
         api_ctx.plugins = plugins
 
         plugin.run_plugin("rewrite", plugins, api_ctx)
-        if api_ctx.consumer then
+        if api_ctx.consumer then        --如果启用了认证插件
             local changed
             local group_conf
 
-            if api_ctx.consumer.group_id then
+            if api_ctx.consumer.group_id then       --consumer所属的group_id, 一个consumer只能属于一个group
                 group_conf = consumer_group.get(api_ctx.consumer.group_id)
                 if not group_conf then
                     core.log.error("failed to fetch consumer group config by ",
@@ -692,6 +722,7 @@ function _M.http_access_phase()
                 end
             end
 
+            -- 合并路由与consumer、consumer_group上的插件配置， 只有consumer上没配置插件时，changed=false
             route, changed = plugin.merge_consumer_route(
                 route,
                 api_ctx.consumer,
@@ -742,7 +773,7 @@ function _M.grpc_access_phase()
     end
 end
 
-
+-- 设置 X-APISIX-Upstream-Status 响应头
 local function set_resp_upstream_status(up_status)
     local_conf = core.config.local_conf()
 
@@ -767,16 +798,16 @@ local function set_resp_upstream_status(up_status)
     end
 end
 
-
+--主要是执行插件的header_filter方法
 function _M.http_header_filter_phase()
     core.response.set_header("Server", ver_header)
 
     local up_status = get_var("upstream_status")
     if up_status then
-        set_resp_upstream_status(up_status)
+        set_resp_upstream_status(up_status)     -- 设置 X-APISIX-Upstream-Status 响应头
     end
 
-    common_phase("header_filter")
+    common_phase("header_filter")   -- 包括global_rules 和 路由上的plugins
 
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -784,7 +815,7 @@ function _M.http_header_filter_phase()
     end
 
     local debug_headers = api_ctx.debug_headers
-    if debug_headers then
+    if debug_headers then   -- 设置到 Apisix-Plugins响应头
         local deduplicate = core.table.new(core.table.nkeys(debug_headers), 0)
         for k, v in pairs(debug_headers) do
             core.table.insert(deduplicate, k)
@@ -793,22 +824,22 @@ function _M.http_header_filter_phase()
     end
 end
 
-
+-- 依次执行 body_filter和delayed_body_filter阶段
 function _M.http_body_filter_phase()
     common_phase("body_filter")
     common_phase("delayed_body_filter")
 end
 
-
+-- 主要是根据上游返回的status和upstream被动健康检查配置调用checker的report_http_status
 local function healthcheck_passive(api_ctx)
     local checker = api_ctx.up_checker
-    if not checker then
+    if not checker then     --如果未配置健康检查，直接返回
         return
     end
 
     local up_conf = api_ctx.upstream_conf
     local passive = up_conf.checks.passive
-    if not passive then
+    if not passive then     --如果未开启被动健康检查，直接返回
         return
     end
 
@@ -823,9 +854,9 @@ local function healthcheck_passive(api_ctx)
                           passive.healthy.http_statuses
     core.log.info("passive.healthy.http_statuses: ",
                   core.json.delay_encode(http_statuses))
-    if http_statuses then
+    if http_statuses then       -- healthy
         for i, status in ipairs(http_statuses) do
-            if resp_status == status then
+            if resp_status == status then   -- 如果上游返回的status在passive.healthy.http_statuses中
                 checker:report_http_status(api_ctx.balancer_ip,
                                            port or api_ctx.balancer_port,
                                            host,
@@ -838,12 +869,12 @@ local function healthcheck_passive(api_ctx)
                     passive.unhealthy.http_statuses
     core.log.info("passive.unhealthy.http_statuses: ",
                   core.json.delay_encode(http_statuses))
-    if not http_statuses then
+    if not http_statuses then       -- unhealthy
         return
     end
 
     for i, status in ipairs(http_statuses) do
-        if resp_status == status then
+        if resp_status == status then       -- 如果上游返回的status在passive.unhealthy.http_statuses中
             checker:report_http_status(api_ctx.balancer_ip,
                                        port or api_ctx.balancer_port,
                                        host,
@@ -859,15 +890,16 @@ function _M.http_log_phase()
         return
     end
 
+    -- report_http_status, 实现被动健康检查
     healthcheck_passive(api_ctx)
 
     if api_ctx.server_picker and api_ctx.server_picker.after_balance then
-        api_ctx.server_picker.after_balance(api_ctx, false)
+        api_ctx.server_picker.after_balance(api_ctx, false)     -- 一些资源释放等
     end
 
-    core.ctx.release_vars(api_ctx)
+    core.ctx.release_vars(api_ctx)      -- 回收api_ctx
     if api_ctx.plugins then
-        core.tablepool.release("plugins", api_ctx.plugins)
+        core.tablepool.release("plugins", api_ctx.plugins)   -- 回收 plugins
     end
 
     if api_ctx.curr_req_matched then
@@ -877,14 +909,16 @@ function _M.http_log_phase()
     core.tablepool.release("api_ctx", api_ctx)
 end
 
-
+-- balance_by_lua
+-- 在失败重试时，会被多次执行
+-- https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream
 function _M.http_balancer_phase()
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
         core.log.error("invalid api_ctx")
         return core.response.exit(500)
     end
-
+    --  load_balancer = require("apisix.balancer")
     load_balancer.run(api_ctx.matched_route, api_ctx, common_phase)
 end
 
@@ -942,7 +976,7 @@ end
 
 end -- do
 
-
+-- control-api 也是监听在一个单独的端口
 function _M.http_control()
     local ok = control_api_router.match(get_var("uri"))
     if not ok then

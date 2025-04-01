@@ -39,6 +39,7 @@ local last_report_time = 0
 
 local REPORT_INTERVAL = 30 -- secs
 
+-- loadstring & run
 local function run_lua_file(file)
     local f, err = io.open(file, "rb")
     if not f then
@@ -59,8 +60,8 @@ end
 
 local function setup_hooks(file)
     if pl_path.exists(file) then
-        dbg.unset_all()
-        local _, err = pcall(run_lua_file, file)
+        dbg.unset_all()     -- 先清理当前的所有hoot
+        local _, err = pcall(run_lua_file, file)    --重新执行file
         local hooks = {}
         for _, hook in ipairs(dbg.hooks()) do
             table_insert(hooks, hook.key)
@@ -69,6 +70,8 @@ local function setup_hooks(file)
     end
 end
 
+-- 1. 查看file是否变化，如变化，重新加载
+-- 2. info级别日志，每30s打印一次仍存活的hoot
 local function reload_hooks(premature, delay, file)
     if premature or stop then
         stop = false
@@ -104,7 +107,9 @@ local function reload_hooks(premature, delay, file)
         running = false
     end
 end
-
+-- plugins/inspect.lua.init
+-- delay: 检查file是否变更重新加载的事件间隔
+-- file:
 function _M.init(delay, file)
     if not running then
         file = file or "/usr/local/apisix/plugin_inspect_hooks.lua"

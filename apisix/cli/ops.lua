@@ -155,9 +155,10 @@ local function get_lua_path(conf)
     return ""
 end
 
-
+-- 很长的函数，主要功能是读取conf/config.yaml配置，校验schema, 校验相关参数，最后生成conf/nginx.conf
+-- 读取结果存放到sys_conf,使用resty.template渲染最终的nginx.conf
 local function init(env)
-    if env.is_root_path then
+    if env.is_root_path then        --不允许在/root目录执行
         print('Warning! Running apisix under /root is only suitable for '
               .. 'development environments and it is dangerous to do so. '
               .. 'It is recommended to run APISIX in a directory '
@@ -199,6 +200,7 @@ local function init(env)
                 .. "please enable `admin_key_required` and set a secure admin key!")
     end
 
+    -- admin_key 检查
     if yaml_conf.apisix.enable_admin and not checked_admin_key then
         local help = [[
 
@@ -783,6 +785,7 @@ Please modify "admin_key" in conf/config.yaml .
     sys_conf["extra_lua_path"] = get_lua_path(yaml_conf.apisix.extra_lua_path)
     sys_conf["extra_lua_cpath"] = get_lua_path(yaml_conf.apisix.extra_lua_cpath)
 
+    -- https://github.com/bungle/lua-resty-template
     local conf_render = template.compile(ngx_tpl)
     local ngxconf = conf_render(sys_conf)
 
@@ -793,12 +796,12 @@ Please modify "admin_key" in conf/config.yaml .
     end
 end
 
-
+-- 初始化etcd, 创建etcd相关目录
 local function init_etcd(env, args)
     etcd.init(env, args)
 end
 
-
+-- 删除conf/.customized_config_path
 local function cleanup(env)
     if env.apisix_home then
         profile.apisix_home = env.apisix_home
@@ -812,7 +815,7 @@ local function sleep(n)
   execute("sleep " .. tonumber(n))
 end
 
-
+-- 查看logs/nginx.pid是否存在
 local function check_running(env)
     local pid_path = env.apisix_home .. "/logs/nginx.pid"
     local pid = util.read_file(pid_path)
@@ -823,9 +826,9 @@ local function check_running(env)
     return true, pid
 end
 
-
+-- 创建 相关目录，初始化nginx.conf 执行openresty启动命令
 local function start(env, ...)
-    cleanup(env)
+    cleanup(env)        -- 删除conf/.customized_config_path
 
     if env.apisix_home then
         profile.apisix_home = env.apisix_home
@@ -892,6 +895,7 @@ local function start(env, ...)
     local args = parser:parse()
 
     local customized_yaml = args["config"]
+    -- 如果使用了config选项，则将config选项指定的文件路径写到 /conf/.customized_config_path
     if customized_yaml then
         local customized_yaml_path
         local idx = str_find(customized_yaml, "/")
@@ -917,16 +921,16 @@ local function start(env, ...)
         print("Use customized yaml: ", customized_yaml)
     end
 
-    init(env)
+    init(env)   -- 读取conf/config.yaml配置，校验schema, 校验相关参数，最后生成conf/nginx.conf
 
     if env.deployment_role ~= "data_plane" then
         init_etcd(env, args)
     end
 
-    util.execute_cmd(env.openresty_args)
+    util.execute_cmd(env.openresty_args)  -- 执行openresty启动命令
 end
 
-
+-- 生成nginx.conf, 调用nginx -t
 local function test(env, backup_ngx_conf)
     -- backup nginx.conf
     local ngx_conf_path = env.apisix_home .. "/conf/nginx.conf"
@@ -988,7 +992,7 @@ local function restart(env)
   start(env)
 end
 
-
+-- 重新生成nginx.conf, 执行 -s reload
 local function reload(env)
     -- reinit nginx.conf
     init(env)

@@ -48,7 +48,7 @@ local schema = {
     required = {"key"}
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/csrf/
 local _M = {
     version = 0.1,
     priority = 2980,
@@ -120,6 +120,7 @@ local function check_csrf_token(conf, ctx, token)
         return false
     end
 
+    -- sha256进行签名， sign = "{expires:" .. expires .. ",random:" .. random .. ",key:" .. key .. "}"
     local sign = gen_sign(random, expires, conf.key)
     if token_table["sign"] ~= sign then
         core.log.error("Invalid signatures")
@@ -132,11 +133,12 @@ end
 
 function _M.access(conf, ctx)
     local method = core.request.get_method(ctx)
-    if core.table.array_find(SAFE_METHODS, method) then
+    if core.table.array_find(SAFE_METHODS, method) then     -- GET HEAD OPTIONS认为是安全的方法，不做处理
         return
     end
 
     local header_token = core.request.header(ctx, conf.name)
+    -- 必须在header、cookie都携带csrf_token
     if not header_token or header_token == "" then
         return 401, {error_msg = "no csrf token in headers"}
     end
@@ -150,6 +152,7 @@ function _M.access(conf, ctx)
         return 401, {error_msg = "csrf token mismatch"}
     end
 
+    -- check token
     local result = check_csrf_token(conf, ctx, cookie_token)
     if not result then
         return 401, {error_msg = "Failed to verify the csrf token signature"}
@@ -158,7 +161,7 @@ end
 
 
 function _M.header_filter(conf, ctx)
-    local csrf_token = gen_csrf_token(conf)
+    local csrf_token = gen_csrf_token(conf)     --每次请求都签发一个csrf_token
     local cookie = conf.name .. "=" .. csrf_token .. ";path=/;SameSite=Lax;Expires="
                    .. ngx_cookie_time(ngx_time() + conf.expires)
     core.response.add_header("Set-Cookie", cookie)

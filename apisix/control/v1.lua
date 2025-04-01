@@ -109,7 +109,7 @@ local function iter_and_add_healthcheck_info(infos, values)
     end
 end
 
-
+--
 local HTML_TEMPLATE = [[
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
@@ -391,6 +391,7 @@ function _M.dump_service_info()
     return 200, info
 end
 
+-- 遍历所有已加载的插件，获取metadata
 function _M.dump_all_plugin_metadata()
     local names = core.config.local_conf().plugins
     local metadatas = core.table.new(0, #names)

@@ -28,7 +28,8 @@ local function sort_by_key_host(a, b)
     return a.host < b.host
 end
 
-
+-- 比较之前的upstream nodes与本次新获取的nodes是否相同
+-- 比较属性包括 "host", "port", "weight", "priority", "metadata"
 local function compare_upstream_node(up_conf, new_t)
     if up_conf == nil then
         return false
@@ -60,14 +61,17 @@ local function compare_upstream_node(up_conf, new_t)
 end
 _M.compare_upstream_node = compare_upstream_node
 
-
+-- 遍历nodes, 如果某个node是域名，则解析域名为IP。如果route.hash_domain, 则route每次被匹配到都会调用此方法
+-- 封装为new_nodes并返回
 local function parse_domain_for_nodes(nodes)
     local new_nodes = core.table.new(#nodes, 0)
     for _, node in ipairs(nodes) do
         local host = node.host
         if not ipmatcher.parse_ipv4(host) and
                 not ipmatcher.parse_ipv6(host) then
+            -- 如果是域名
             local ip, err = core.resolver.parse_domain(host)
+            -- 只用了解析结果的ip
             if ip then
                 local new_node = core.table.clone(node)
                 new_node.host = ip

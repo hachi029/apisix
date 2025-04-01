@@ -106,7 +106,8 @@ local schema = {
     },
 }
 
-
+--https://apisix.apache.org/zh/docs/apisix/plugins/proxy-cache/
+-- 支持基于磁盘和内存的缓存
 local _M = {
     version = 0.2,
     priority = 1085,
@@ -157,7 +158,8 @@ end
 function _M.access(conf, ctx)
     core.log.info("proxy-cache plugin access phase, conf: ", core.json.delay_encode(conf))
 
-    local value = util.generate_complex_value(conf.cache_key, ctx)
+    -- cache_key array[string]. 如["$host", "$request_uri"]
+    local value = util.generate_complex_value(conf.cache_key, ctx) --解析变量
     ctx.var.upstream_cache_key = value
     core.log.info("proxy-cache cache key value:", value)
 

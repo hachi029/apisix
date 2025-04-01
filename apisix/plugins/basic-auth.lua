@@ -74,7 +74,8 @@ function _M.check_schema(conf, schema_type)
 
     return true
 end
-
+-- Authorization: Basic Zm9vOmJhcg==
+-- Authorization: Basic base64_encode(foo:bar)
 local function extract_auth_header(authorization)
 
     local function do_extract(auth)
@@ -177,10 +178,13 @@ function _M.rewrite(conf, ctx)
 
     core.log.info("consumer: ", core.json.delay_encode(cur_consumer))
 
-    if conf.hide_credentials then
+    if conf.hide_credentials then       -- 隐藏credentials
         core.request.set_header(ctx, "Authorization", nil)
     end
 
+    -- X-Consumer-Username", consumer.username)
+    -- X-Credential-Identifier", consumer.credential_id)
+    -- X-Consumer-Custom-ID", consumer.custom_id)
     consumer.attach_consumer(ctx, cur_consumer, consumer_conf)
 
     core.log.info("hit basic-auth access")

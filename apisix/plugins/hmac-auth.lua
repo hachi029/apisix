@@ -78,6 +78,8 @@ local consumer_schema = {
     required = {"key_id", "secret_key"},
 }
 
+-- https://apisix.apache.org/zh/docs/apisix/plugins/hmac-auth/
+-- hmac认证，包含对参数签名的校验
 local _M = {
     version = 0.1,
     priority = 2530,
@@ -181,7 +183,7 @@ local function sha256(key)
     return digest
 end
 
-
+-- 校验hmac签名，返回从中获取的用户信息
 local function validate(ctx, conf, params)
     if not params then
         return nil
@@ -195,7 +197,7 @@ local function validate(ctx, conf, params)
         return nil, "algorithm missing"
     end
 
-    local consumer, err = get_consumer(params.keyId)
+    local consumer, err = get_consumer(params.keyId)    -- params.keyId 从请求头Authorization字符串中提取出来的
     if err then
         return nil, err
     end
@@ -219,7 +221,7 @@ local function validate(ctx, conf, params)
     end
 
     core.log.info("clock_skew: ", conf.clock_skew)
-    if conf.clock_skew and conf.clock_skew > 0 then
+    if conf.clock_skew and conf.clock_skew > 0 then     --时间校验，防重放攻击
         if not params.date then
             return nil, "Date header missing. failed to validate clock skew"
         end
@@ -255,13 +257,13 @@ local function validate(ctx, conf, params)
 
     local secret_key          = consumer_conf and consumer_conf.secret_key
     local request_signature   = ngx_decode_base64(params.signature)
-    local generated_signature = generate_signature(ctx, secret_key, params)
+    local generated_signature = generate_signature(ctx, secret_key, params)     --相同步骤生成签名
     if request_signature ~= generated_signature then
         return nil, "Invalid signature"
     end
 
     local validate_request_body = conf.validate_request_body
-    if validate_request_body then
+    if validate_request_body then       -- 请求体与请求参数里的params.body_digest 进行匹配
         local digest_header = params.body_digest
         if not digest_header then
             return nil, "Invalid digest"
@@ -283,7 +285,7 @@ local function validate(ctx, conf, params)
     return consumer
 end
 
-
+-- 从请求头中提取hmac相关参数
 local function retrieve_hmac_fields(ctx)
     local hmac_params = {}
     local auth_string = core.request.header(ctx, "Authorization")
@@ -322,7 +324,7 @@ local function retrieve_hmac_fields(ctx)
 end
 
 local function find_consumer(conf, ctx)
-    local params,err = retrieve_hmac_fields(ctx)
+    local params,err = retrieve_hmac_fields(ctx)    --从请求头中提取hmac相关参数
     if err then
         if not auth_utils.is_running_under_multi_auth(ctx) then
             core.log.warn("client request can't be validated: ", err)
@@ -330,7 +332,7 @@ local function find_consumer(conf, ctx)
         return nil, nil, "client request can't be validated: " .. err
     end
 
-    local validated_consumer, err = validate(ctx, conf, params)
+    local validated_consumer, err = validate(ctx, conf, params) --校验签名
     if not validated_consumer then
         err = "client request can't be validated: " .. (err or "Invalid signature")
         if auth_utils.is_running_under_multi_auth(ctx) then
@@ -353,7 +355,7 @@ function _M.rewrite(conf, ctx)
         end
         cur_consumer, consumers_conf, err = consumer.get_anonymous_consumer(conf.anonymous_consumer)
         if not cur_consumer then
-            if auth_utils.is_running_under_multi_auth(ctx) then
+            if auth_utils.is_running_under_multi_auth(ctx) then     --是否是从multi_auth插件调用过来的
                 return 401, err
             end
             core.log.error(err)

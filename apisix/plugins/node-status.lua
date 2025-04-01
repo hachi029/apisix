@@ -27,7 +27,7 @@ local schema = {
     type = "object",
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/node-status/
 local _M = {
     version = 0.1,
     priority = 1000,
@@ -43,9 +43,9 @@ local ngx_status_items = {
     "reading", "writing", "waiting"
 }
 
-
+-- 对stub_status模块的响应进行封装
 local function collect()
-    local res = ngx_capture("/apisix/nginx_status")
+    local res = ngx_capture("/apisix/nginx_status") -- 使用stub_status模块
     if res.status ~= 200 then
         return res.status
     end

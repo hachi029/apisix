@@ -28,6 +28,10 @@ local str_sub   = string.sub
 
 
 local name = "ext-plugin-post-resp"
+
+-- https://apisix.apache.org/zh/docs/apisix/plugins/ext-plugin-post-resp/
+-- 在请求获取到上游的响应之后执行。 before_proxy。启用本插件之后，APISIX 将使用 lua-resty-http 库向上游发起请求
+-- 获取到响应后执行外部插件。
 local _M = {
     version = 0.1,
     priority = -4000,
@@ -50,7 +54,8 @@ local function close(http_obj)
     end
 end
 
-
+-- 获取请求参数，使用lua-resty-http发起请求，返回响应
+-- return res, err
 local function get_response(ctx, http_obj)
     local ok, err = http_obj:connect({
         scheme = ctx.upstream_scheme,
@@ -148,7 +153,7 @@ end
 
 function _M.before_proxy(conf, ctx)
     local http_obj = http.new()
-    local res, err = get_response(ctx, http_obj)
+    local res, err = get_response(ctx, http_obj)        -- 使用 lua-resty-http 库向上游发起请求而不是让nginx去proxy
     if not res or err then
         core.log.error("failed to request: ", err or "")
         close(http_obj)

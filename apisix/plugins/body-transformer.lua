@@ -56,7 +56,8 @@ local schema = {
     },
 }
 
-
+--https://apisix.apache.org/zh/docs/apisix/plugins/body-transformer/
+-- transform the request and/or response body from one format to another format, e.g. JSON to XML
 local _M = {
     version  = 0.1,
     priority = 1080,

@@ -47,7 +47,8 @@ local consumer_schema = {
     required = {"key"},
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/key-auth/
+-- 可以配置在route或service上
 local _M = {
     version = 0.1,
     priority = 2500,
@@ -68,18 +69,20 @@ end
 
 local function find_consumer(ctx, conf)
     local from_header = true
-    local key = core.request.header(ctx, conf.header)
+    local key = core.request.header(ctx, conf.header)       -- 从header中找
 
-    if not key then
+    if not key then     -- 从query_string中找
         local uri_args = core.request.get_uri_args(ctx) or {}
         key = uri_args[conf.query]
         from_header = false
     end
 
-    if not key then
+    if not key then     --未找到
         return nil, nil, "Missing API key in request"
     end
 
+    -- consumer_conf包含了插件对应的所有consumer的auth配置
+    -- consumer 包含了该consumer所有auth配置
     local consumer, consumer_conf, err = consumer_mod.find_consumer(plugin_name, "key", key)
     if not consumer then
         core.log.warn("failed to find consumer: ", err or "invalid api key")

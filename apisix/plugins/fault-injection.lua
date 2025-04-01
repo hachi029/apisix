@@ -77,7 +77,9 @@ local schema = {
     minProperties = 1,
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/fault-injection/
+-- 故障注入, 故障响应：abort：(status, headers, body)，返回故障时机(percentage/vars),
+--         注入延时 duration，注入延迟时机(percentage/vars)
 local _M = {
     version = 0.1,
     priority = 11000,
@@ -154,12 +156,12 @@ function _M.rewrite(conf, ctx)
     end
     core.log.info("delay_vars: ", delay_vars)
 
-    if conf.delay and sample_hit(conf.delay.percentage) and delay_vars then
+    if conf.delay and sample_hit(conf.delay.percentage) and delay_vars then     -- 命中delay
         sleep(conf.delay.duration)
     end
 
-    if conf.abort and sample_hit(conf.abort.percentage) and abort_vars then
-        if conf.abort.headers then
+    if conf.abort and sample_hit(conf.abort.percentage) and abort_vars then     -- 命中abort
+        if conf.abort.headers then  -- 配置header
             for header_name, header_value in pairs(conf.abort.headers) do
                 if type(header_value) == "string" then
                     header_value = core.utils.resolve_var(header_value, ctx.var)
@@ -167,7 +169,7 @@ function _M.rewrite(conf, ctx)
                 ngx.header[header_name] = header_value
             end
         end
-        return conf.abort.http_status, core.utils.resolve_var(conf.abort.body, ctx.var)
+        return conf.abort.http_status, core.utils.resolve_var(conf.abort.body, ctx.var) --配置status和body
     end
 end
 

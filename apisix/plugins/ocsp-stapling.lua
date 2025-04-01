@@ -33,6 +33,8 @@ local plugin_schema = {
     properties = {},
 }
 
+--https://apisix.apache.org/zh/docs/apisix/plugins/ocsp-stapling/
+--https://zhuanlan.zhihu.com/p/302697430
 local _M = {
     name = plugin_name,
     schema = plugin_schema,
@@ -48,6 +50,7 @@ end
 
 local function fetch_ocsp_resp(der_cert_chain)
     core.log.info("fetch ocsp response from remote")
+    -- 从证书中获取ocsp_url
     local ocsp_url, err = ngx_ocsp.get_ocsp_responder_from_der_chain(der_cert_chain)
 
     if not ocsp_url then
@@ -58,11 +61,13 @@ local function fetch_ocsp_resp(der_cert_chain)
         return nil, "failed to get ocsp url: " .. err
     end
 
+    -- 查询ocsp
     local ocsp_req, err = ngx_ocsp.create_ocsp_request(der_cert_chain)
     if not ocsp_req then
         return nil, "failed to create ocsp request: " .. err
     end
 
+    -- 发起请求
     local httpc = http.new()
     local res, err = httpc:request_uri(ocsp_url, {
         method = "POST",
@@ -96,10 +101,10 @@ local function set_ocsp_resp(full_chain_pem_cert, skip_verify, cache_ttl)
         return false, "failed to convert certificate chain from PEM to DER: ", err
     end
 
-    local ocsp_resp = ocsp_resp_cache:get(der_cert_chain)
+    local ocsp_resp = ocsp_resp_cache:get(der_cert_chain)       -- 缓存ocsp_resp
     if ocsp_resp == nil then
         core.log.info("not ocsp resp cache found, fetch from ocsp responder")
-        ocsp_resp, err = fetch_ocsp_resp(der_cert_chain)
+        ocsp_resp, err = fetch_ocsp_resp(der_cert_chain)        -- 获取ocsp_resp
         if ocsp_resp == nil then
             return false, err
         end

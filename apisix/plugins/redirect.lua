@@ -66,7 +66,8 @@ local schema = {
 
 
 local plugin_name = "redirect"
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/redirect/
+-- 可用于配置 URI 重定向。
 local _M = {
     version = 0.1,
     priority = 900,
@@ -187,7 +188,7 @@ function _M.rewrite(conf, ctx)
     local ret_port = get_port(attr)
 
     local uri = conf.uri
-    local regex_uri = conf.regex_uri
+    local regex_uri = conf.regex_uri  -- 将来自客户端的 URL 与正则表达式匹配并重定向
 
     local proxy_proto = core.request.header(ctx, "X-Forwarded-Proto")
     local _scheme = proxy_proto or core.request.get_scheme(ctx)
@@ -209,14 +210,14 @@ function _M.rewrite(conf, ctx)
 
     if ret_code then
         local new_uri
-        if uri then
+        if uri then     --配置的重定向到的 URI，可以包含nginx变量
             local err
-            new_uri, err = concat_new_uri(uri, ctx)
+            new_uri, err = concat_new_uri(uri, ctx) -- 解析nginx变量，构建重定向url
             if not new_uri then
                 core.log.error("failed to generate new uri by: " .. uri .. err)
                 return 500
             end
-        elseif regex_uri then
+        elseif regex_uri then   --将来自客户端的 URL 与正则表达式匹配并重定向
             local n, err
             new_uri, n, err = re_sub(ctx.var.uri, regex_uri[1],
                                      regex_uri[2], "jo")
@@ -236,7 +237,7 @@ function _M.rewrite(conf, ctx)
             return
         end
 
-        local index = str_find(new_uri, "?")
+        local index = str_find(new_uri, "?")    --url encode
         if conf.encode_uri then
             if index then
                 new_uri = core.utils.uri_safe_encode(str_sub(new_uri, 1, index-1)) ..

@@ -226,6 +226,7 @@ local function run()
         end
     end
 
+    -- seg_id : 配置的id, resource: 配置模块，如route
     local code, data
     if seg_res == "schema" or seg_res == "plugins" then
         code, data = resource[method](seg_id, req_body, seg_sub_path, uri_args)
@@ -250,7 +251,7 @@ local function run()
             core.response.set_header("X-API-VERSION", "v2")
         end
         if resource.need_v3_filter then
-            data = v3_adapter.filter(data)
+            data = v3_adapter.filter(data)      --处理分页
         end
 
         data = strip_etcd_resp(data)
@@ -311,11 +312,12 @@ local function plugins_eq(old, new)
     return core.table.set_eq(old_set, new_set)
 end
 
-
+-- 同步本地配置文件里的plugins列表到etcd 的/plugins路径
+-- reset: 是否先比较etcd在update
 local function sync_local_conf_to_etcd(reset)
     local local_conf = core.config.local_conf()
 
-    local plugins = {}
+    local plugins = {}      --从local_conf读取到的插件名称放到这张表里
     for _, name in ipairs(local_conf.plugins) do
         core.table.insert(plugins, {
             name = name,
@@ -329,7 +331,7 @@ local function sync_local_conf_to_etcd(reset)
         })
     end
 
-    if reset then
+    if reset then  --如果reset=true, 尝试从etcd中读取，和本地读取plugins比较，不相同才往etcd里设值；否则直接设值
         local res, err = core.etcd.get("/plugins")
         if not res then
             core.log.error("failed to get current plugins: ", err)
@@ -348,13 +350,14 @@ local function sync_local_conf_to_etcd(reset)
 
         local stored_plugins = res.body.node.value
         local revision = res.body.node.modifiedIndex
-        if plugins_eq(stored_plugins, plugins) then
+        if plugins_eq(stored_plugins, plugins) then     --本地读取到的和etcd里的相比较， 只是比较插件名称
             core.log.info("plugins not changed, don't need to reset")
             return
         end
 
         core.log.warn("sync local conf to etcd")
 
+        -- 如果不相同，设置到/plugins里
         local res, err = core.etcd.atomic_set("/plugins", plugins, nil, revision)
         if not res then
             core.log.error("failed to set plugins: ", err)
@@ -452,17 +455,18 @@ local uri_route = {
     },
 }
 
-
+-- createdIndex/modifiedIndex
 function _M.init_worker()
     local local_conf = core.config.local_conf()
     if not local_conf.apisix or not local_conf.apisix.enable_admin then
         return
     end
 
-    router = route.new(uri_route)
+    router = route.new(uri_route)       --admin api 路由, admin-api监听在专门的一个端口，和业务流量区分开
 
     -- register reload plugin handler
     events = require("apisix.events")
+    -- 插件reload事件监听，当调用/apisix/admin/plugins/reload 时，触发事件，每个worker都会reload_plugins
     events:register(reload_plugins, reload_event, "PUT")
 
     if ngx_worker_id() == 0 then
@@ -479,6 +483,7 @@ function _M.init_worker()
             end
 
             -- try to reset the /plugins to the current configuration in the admin
+            -- 同步本地配置文件里的plugins列表到etcd 的/plugins路径
             sync_local_conf_to_etcd(true)
         end)
 

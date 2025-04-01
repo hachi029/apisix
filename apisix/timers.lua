@@ -63,7 +63,7 @@ end
 
 function _M.init_worker()
     local opts = {
-        each_ttl = 0,
+        each_ttl = 0,       -- each look run time
         sleep_succ = 0,
         check_interval = check_interval,
     }
@@ -76,7 +76,7 @@ function _M.init_worker()
     core.log.notice("succeed to create background timer")
 end
 
-
+-- 插件的init方法里执行。注册周期任务给特权进程
 function _M.register_timer(name, f, privileged)
     if privileged and not is_privileged() then
         return

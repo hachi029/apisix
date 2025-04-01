@@ -50,6 +50,7 @@ local function remove_etcd_prefix(key)
     return string_sub(key, #prefix + 1)
 end
 
+-- consumer是以name为key在etcd存储的
 -- /{etcd.prefix}/consumers/{consumer_name}/credentials/{credential_id} --> {consumer_name}
 local function get_consumer_name_from_credential_etcd_key(key)
     local uri_segs = core.utils.split_uri(remove_etcd_prefix(key))
@@ -70,6 +71,7 @@ local function get_credential_id_from_etcd_key(key)
     return uri_segs[5]
 end
 
+-- 过滤data_list中的 credential_etcd_key
 local function filter_consumers_list(data_list)
     if #data_list == 0 then
         return data_list
@@ -96,9 +98,10 @@ local function construct_consumer_data(val, plugin_config)
     -- if the val is a Credential, to get the Consumer by consumer_name and then clone
     -- it to the local consumer.
     local consumer
+    -- 是否是这种格式的 /{etcd.prefix}/consumers/{consumer_name}/credentials/{credential_id}
     if is_credential_etcd_key(val.key) then
         local consumer_name = get_consumer_name_from_credential_etcd_key(val.key)
-        local the_consumer = consumers:get(consumer_name)
+        local the_consumer = consumers:get(consumer_name)  -- etcd上配置的consumer
         if the_consumer and the_consumer.value then
             consumer = core.table.clone(the_consumer.value)
             consumer.modifiedIndex = the_consumer.modifiedIndex
@@ -130,7 +133,7 @@ local function construct_consumer_data(val, plugin_config)
     return consumer
 end
 
-
+-- 获取所有认证插件配置的所有consumer认证信息。plugins[name]={nodes={consumer1,consumer2,..}, len=}
 function plugin_consumer()
     local plugins = {}
 
@@ -141,14 +144,14 @@ function plugin_consumer()
     -- consumers.values is the list that got from etcd by prefix key {etcd_prefix}/consumers.
     -- So it contains consumers and credentials.
     -- The val in the for-loop may be a Consumer or a Credential.
-    for _, val in ipairs(consumers.values) do
+    for _, val in ipairs(consumers.values) do       -- 循环遍历所有consumer
         if type(val) ~= "table" then
             goto CONTINUE
         end
 
-        for name, config in pairs(val.value.plugins or {}) do
+        for name, config in pairs(val.value.plugins or {}) do   -- 循环该consumer配置的所有plugin
             local plugin_obj = plugin.get(name)
-            if plugin_obj and plugin_obj.type == "auth" then
+            if plugin_obj and plugin_obj.type == "auth" then        -- 只关注auth类型的插件
                 if not plugins[name] then
                     plugins[name] = {
                         nodes = {},
@@ -157,6 +160,7 @@ function plugin_consumer()
                     }
                 end
 
+                -- name是插件的名称，id是consumer的id
                 local consumer = consumers_id_lrucache(val.value.id .. name,
                         val.modifiedIndex, construct_consumer_data, val, config)
                 if consumer == nil then
@@ -224,19 +228,20 @@ do
     local consumer_lrucache = core.lrucache.new({
             count = consumers_count_for_lrucache
         })
-
+-- 解析auth_conf中的密钥，格式可能为: auth_conf: {"key"="$ENV://$env_name", secret="$secret://vault/1/jack/auth-key"}
 local function fill_consumer_secret(consumer)
     local new_consumer = core.table.clone(consumer)
     new_consumer.auth_conf = secret.fetch_secrets(new_consumer.auth_conf, false)
     return new_consumer
 end
 
-
+-- consumers_conf：{conf_version=3, nodes:[{username=xxx, auth_conf={"key":""},{}..}]}
 function create_consume_cache(consumers_conf, key_attr)
     local consumer_names = {}
 
     for _, consumer in ipairs(consumers_conf.nodes) do
         core.log.info("consumer node: ", core.json.delay_encode(consumer))
+        -- 解析填充consumer.auth_conf中可能存在的秘钥引用
         local new_consumer = consumer_lrucache(consumer, nil,
                                 fill_consumer_secret, consumer)
         consumer_names[new_consumer.auth_conf[key_attr]] = new_consumer
@@ -259,10 +264,13 @@ end
 function _M.find_consumer(plugin_name, key, key_value)
     local consumer
     local consumer_conf
+    -- 包含了此插件所有的consumer配置
+    -- {nodes:{{username:"",id:"", plugins:{"key-auth":{},"basic-auth":{}}}}, conf_version=1}
     consumer_conf = _M.plugin(plugin_name)
     if not consumer_conf then
         return nil, nil, "Missing related consumer"
     end
+    -- 从auth_conf中查找key(key, username)
     local consumers = _M.consumers_kv(plugin_name, consumer_conf, key)
     consumer = consumers[key_value]
     return consumer, consumer_conf
@@ -305,7 +313,7 @@ function _M.init_worker()
         cfg.filter = filter
     end
 
-    consumers, err = core.config.new("/consumers", cfg)
+    consumers, err = core.config.new("/consumers", cfg)     --持续监听/consumers更新
     if not consumers then
         error("failed to create etcd instance for fetching consumers: " .. err)
         return
@@ -332,7 +340,7 @@ local function get_anonymous_consumer_from_local_cache(name)
     return anon_consumer, anon_consumer_conf
 end
 
-
+-- 从/etcd中找到指定name的consumer
 function _M.get_anonymous_consumer(name)
     local anon_consumer, anon_consumer_conf, err
     anon_consumer, anon_consumer_conf, err = get_anonymous_consumer_from_local_cache(name)

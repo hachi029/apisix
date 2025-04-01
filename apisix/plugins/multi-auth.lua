@@ -31,7 +31,10 @@ local schema = {
 
 
 local plugin_name = "multi-auth"
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/multi-auth/
+--允许多个 Consumer 在使用不同身份验证方式时共享相同的 Route ，同时。
+-- 例如：一个 Consumer 使用 basic 认证，而另一个消费者使用 JWT 认证
+-- 会执行配置的多个认证插件的rewrite方法，有任一插件认证通过，即认证成功。
 local _M = {
     version = 0.1,
     priority = 2600,
@@ -72,17 +75,17 @@ function _M.rewrite(conf, ctx)
     local status_code
     local errors = {}
 
-    for k, auth_plugin in pairs(auth_plugins) do
+    for k, auth_plugin in pairs(auth_plugins) do        --执行每种认证插件的rewrite方法
         for auth_plugin_name, auth_plugin_conf in pairs(auth_plugin) do
             local auth = plugin.get(auth_plugin_name)
             -- returns 401 HTTP status code if authentication failed, otherwise returns nothing.
-            local auth_code, err = auth.rewrite(auth_plugin_conf, ctx)
+            local auth_code, err = auth.rewrite(auth_plugin_conf, ctx)  -- 返回nil表示认证通过
             if type(err) == "table" then
                 err = err.message  -- compat
             end
 
             status_code = auth_code
-            if auth_code == nil then
+            if auth_code == nil then    --认证通过
                 core.log.debug(auth_plugin_name .. " succeed to authenticate the request")
                 goto authenticated
             else

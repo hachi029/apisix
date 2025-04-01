@@ -25,7 +25,7 @@ local schema = {
     },
 }
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/public-api/
 local _M = {
     version = 0.1,
     priority = 501,
@@ -38,13 +38,13 @@ function _M.check_schema(conf)
     return core.schema.check(schema, conf)
 end
 
-
+-- 用于暴露插件配置的api方法
 function _M.access(conf, ctx)
     -- overwrite the uri in the ctx when the user has set the target uri
     ctx.var.uri = conf.uri or ctx.var.uri
 
     -- perform route matching
-    if router.api.match(ctx) then
+    if router.api.match(ctx) then       -- 用public-api插件暴露其他插件的api方法
         return
     end
 

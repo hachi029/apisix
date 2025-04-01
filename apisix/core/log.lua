@@ -57,6 +57,8 @@ local function update_log_level()
     -- Nginx use `notice` level in init phase instead of error_log directive config
     -- Ref to src/core/ngx_log.c's ngx_log_init
     if ngx_get_phase() ~= "init" then
+        -- get_sys_filter_level 获取当前nginx.conf里配置的日志级别
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/errlog.md#get_sys_filter_level
         cur_level = ngx.config.subsystem == "http" and ngx_errlog.get_sys_filter_level()
     end
 end
@@ -90,13 +92,14 @@ function _M.new(prefix)
     return m
 end
 
-
+-- cmd: debug info notice warn ...
 setmetatable(_M, {__index = function(self, cmd)
     local log_level = log_levels[cmd]
     local method
     update_log_level()
 
-    if cur_level and (log_level > cur_level)
+    -- 日志级别越低，值越大
+    if cur_level and (log_level > cur_level) -- debug > notice, cur_level 是配置的日志级别
     then
         method = do_nothing
     else

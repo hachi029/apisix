@@ -108,7 +108,10 @@ local function generate_tag(entry, const_tags)
     return ""
 end
 
-
+-- tag: 主要指标：
+-- request.counter request.latency
+-- upstream.latency apisix.latency
+-- ingress.size egress.size
 local function send_metric_over_udp(entry, metadata)
     local err_msg
     local sock = udp()
@@ -211,7 +214,7 @@ local function push_metrics(entries)
                   ":", metadata.value.port)
 
     for i = 1, #entries do
-        local ok, err = send_metric_over_udp(entries[i], metadata)
+        local ok, err = send_metric_over_udp(entries[i], metadata)  --使用udp发送
         if not ok then
             return false, err, i
         end

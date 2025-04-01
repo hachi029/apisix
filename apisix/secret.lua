@@ -29,6 +29,7 @@ local pairs     = pairs
 
 local _M = {}
 
+-- https://apisix.apache.org/zh/docs/apisix/terminology/secret/
 
 local PREFIX = "$secret://"
 local secrets
@@ -83,7 +84,7 @@ function _M.init_worker()
     secrets = core.config.new("/secrets", cfg)
 end
 
-
+-- 检查secret_uri是否以 "$secret://" 或 "$ENV://" 开头
 local function check_secret_uri(secret_uri)
     -- Avoid the error caused by has_prefix to cause a crash.
     if type(secret_uri) ~= "string" then
@@ -100,9 +101,14 @@ end
 
 _M.check_secret_uri = check_secret_uri
 
-
+-- secret_uri: $secret://
+-- return opts = {
+--        manager = manager,
+--        confid = confid,
+--        key = key
+--    }
 local function parse_secret_uri(secret_uri)
-    local is_secret_uri, err = check_secret_uri(secret_uri)
+    local is_secret_uri, err = check_secret_uri(secret_uri)     --j
     if not is_secret_uri then
         return is_secret_uri, err
     end
@@ -133,14 +139,16 @@ local function parse_secret_uri(secret_uri)
     return opts
 end
 
-
+-- secret_uri is like: $secret://
+-- 这个方法读取secret_uri代表的秘钥
 local function fetch_by_uri(secret_uri)
     core.log.info("fetching data from secret uri: ", secret_uri)
-    local opts, err = parse_secret_uri(secret_uri)
+    local opts, err = parse_secret_uri(secret_uri)      -- 解析secret_uri中的信息为opts
     if not opts then
         return nil, err
     end
 
+    -- 从etcd读取 /secrets/$manager/$confid 配置
     local conf = secret_kv(opts.manager, opts.confid)
     if not conf then
         return nil, "no secret conf, secret_uri: " .. secret_uri
@@ -150,7 +158,7 @@ local function fetch_by_uri(secret_uri)
     if not ok then
         return nil, "no secret manager: " .. opts.manager
     end
-
+    -- 从具体的秘钥管理器中获取值
     local value, err = sm.get(conf, opts.key)
     if err then
         return nil, err
@@ -162,7 +170,7 @@ end
 -- for test
 _M.fetch_by_uri = fetch_by_uri
 
-
+-- 读取uri代表的秘钥，uri类似
 local function fetch(uri)
     -- do a quick filter to improve retrieval speed
     if byte(uri, 1, 1) ~= byte('$') then
@@ -170,9 +178,9 @@ local function fetch(uri)
     end
 
     local val, err
-    if string.has_prefix(upper(uri), core.env.PREFIX) then
+    if string.has_prefix(upper(uri), core.env.PREFIX) then -- $ENV://
         val, err = core.env.fetch_by_uri(uri)
-    elseif string.has_prefix(uri, PREFIX) then
+    elseif string.has_prefix(uri, PREFIX) then  -- $secret://
         val, err = fetch_by_uri(uri)
     end
 
@@ -192,6 +200,7 @@ local secrets_lrucache = core.lrucache.new({
 local fetch_secrets
 do
     local retrieve_refs
+    -- 迭代解析refs中value存在的引用秘钥
     function retrieve_refs(refs)
         for k, v in pairs(refs) do
             local typ = type(v)
@@ -211,11 +220,12 @@ do
         return retrieve_refs(new_refs)
     end
 
+    -- 解析refs中存在的引用格式的秘钥
     function fetch_secrets(refs, cache, key, version)
         if not refs or type(refs) ~= "table" then
             return nil
         end
-        if not cache then
+        if not cache then       -- 不允许缓存
             return retrieve(refs)
         end
         return secrets_lrucache(key, version, retrieve, refs)

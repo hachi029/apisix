@@ -80,7 +80,7 @@ local function set_directly(ctx, key, ver, conf)
 end
 _M.set = set_directly
 
-
+-- 销毁健康检查器
 local function release_checker(healthcheck_parent)
     local checker = healthcheck_parent.checker
     core.log.info("try to release checker: ", tostring(checker))
@@ -94,13 +94,14 @@ local function get_healthchecker_name(value)
 end
 _M.get_healthchecker_name = get_healthchecker_name
 
-
+-- 创建健康检查器
 local function create_checker(upstream)
     if healthcheck == nil then
         healthcheck = require("resty.healthcheck")
     end
 
-    local healthcheck_parent = upstream.parent
+    local healthcheck_parent = upstream.parent  -- 可能是route 或 service
+    -- 如果已经有healthcheck，不再创建
     if healthcheck_parent.checker and healthcheck_parent.checker_upstream == upstream then
         return healthcheck_parent.checker
     end
@@ -109,11 +110,12 @@ local function create_checker(upstream)
         core.log.info("another request is creating new checker")
         return nil
     end
-    upstream.is_creating_checker = true
+    upstream.is_creating_checker = true     --标识正在创建
 
     core.log.debug("events module used by the healthcheck: ", events.events_module,
                     ", module name: ",events:get_healthcheck_events_modele())
 
+    -- https://github.com/api7/lua-resty-healthcheck apisix自己版本的healthcheck，相对于kong的实现修改了很多
     local checker, err = healthcheck.new({
         name = get_healthchecker_name(healthcheck_parent),
         shm_name = "upstream-healthcheck",
@@ -122,7 +124,7 @@ local function create_checker(upstream)
         -- events.healthcheck_events_module is set
         -- while the healthcheck object is executed in the http access phase,
         -- so it can be used here
-        events_module = events:get_healthcheck_events_modele(),
+        events_module = events:get_healthcheck_events_modele(), -- "resty.events" or "resty.worker.events"
     })
 
     if not checker then
@@ -132,6 +134,7 @@ local function create_checker(upstream)
     end
 
     if healthcheck_parent.checker then
+        -- fire= true, 取消的同时也会调用clean_handler
         local ok, err = pcall(core.config_util.cancel_clean_handler, healthcheck_parent,
                                               healthcheck_parent.checker_idx, true)
         if not ok then
@@ -156,7 +159,7 @@ local function create_checker(upstream)
     end
 
     local check_idx, err = core.config_util.add_clean_handler(healthcheck_parent, release_checker)
-    if not check_idx then
+    if not check_idx then       -- 添加失败
         upstream.is_creating_checker = nil
         checker:clear()
         checker:stop()
@@ -206,7 +209,7 @@ local scheme_to_port = {
 
 _M.scheme_to_port = scheme_to_port
 
-
+-- 主要是如果node没有配置port, 则根据scheme填充默认node的端口: 80/443
 local function fill_node_info(up_conf, scheme, is_stream)
     local nodes = up_conf.nodes
     if up_conf.nodes_ref == nodes then
@@ -261,7 +264,8 @@ local function fill_node_info(up_conf, scheme, is_stream)
     return true
 end
 
-
+-- service_name 与nodes 二选一，用于服务发现； 如果node个数>1, 创建健康检查器
+--
 function _M.set_by_route(route, api_ctx)
     if api_ctx.upstream_conf then
         -- upstream_conf has been set by traffic-split plugin
@@ -269,11 +273,12 @@ function _M.set_by_route(route, api_ctx)
     end
 
     local up_conf = api_ctx.matched_upstream
-    if not up_conf then
+    if not up_conf then     -- upstream为nil, 返回503
         return 503, "missing upstream configuration in Route or Service"
     end
     -- core.log.info("up_conf: ", core.json.delay_encode(up_conf, true))
 
+    -- service_name 与nodes 二选一，用于服务发现
     if up_conf.service_name then
         if not discovery then
             return 503, "discovery is uninitialized"
@@ -282,19 +287,21 @@ function _M.set_by_route(route, api_ctx)
             return 503, "discovery server need appoint"
         end
 
-        local dis = discovery[up_conf.discovery_type]
+        local dis = discovery[up_conf.discovery_type]   -- 具体的discovery类型
         if not dis then
             local err = "discovery " .. up_conf.discovery_type .. " is uninitialized"
             return 503, err
         end
 
+        -- 从discovery获取service_name对应的节点列表
         local new_nodes, err = dis.nodes(up_conf.service_name, up_conf.discovery_args)
         if not new_nodes then
             return HTTP_CODE_UPSTREAM_UNAVAILABLE, "no valid upstream node: " .. (err or "nil")
         end
 
+        -- 节点是否有变更
         local same = upstream_util.compare_upstream_node(up_conf, new_nodes)
-        if not same then
+        if not same then  -- 发生了变更，更新为新的nodes
             local pass, err = core.schema.check(core.schema.discovery_nodes, new_nodes)
             if not pass then
                 return HTTP_CODE_UPSTREAM_UNAVAILABLE, "invalid nodes format: " .. err
@@ -330,7 +337,9 @@ function _M.set_by_route(route, api_ctx)
         return HTTP_CODE_UPSTREAM_UNAVAILABLE, "no valid upstream node"
     end
 
+    -- subsystem非http代理
     if not is_http then
+        -- 根据scheme填充默认node的端口
         local ok, err = fill_node_info(up_conf, nil, true)
         if not ok then
             return 503, err
@@ -352,18 +361,21 @@ function _M.set_by_route(route, api_ctx)
         return
     end
 
+    -- 设置 ctx.upstream_scheme http or https
     set_upstream_scheme(api_ctx, up_conf)
 
+    -- 根据scheme填充默认node的端口
     local ok, err = fill_node_info(up_conf, api_ctx.upstream_scheme, false)
     if not ok then
         return 503, err
     end
 
     if nodes_count > 1 then
-        local checker = fetch_healthchecker(up_conf)
+        local checker = fetch_healthchecker(up_conf) -- 如果upstream配置了健康检查，创建健康检查器
         api_ctx.up_checker = checker
     end
 
+    -- ssl相关
     local scheme = up_conf.scheme
     if (scheme == "https" or scheme == "grpcs") and up_conf.tls then
 
@@ -378,6 +390,7 @@ function _M.set_by_route(route, api_ctx)
 
         -- the sni here is just for logging
         local sni = api_ctx.var.upstream_host
+        -- 根据 sni 查找证书
         local cert, err = apisix_ssl.fetch_cert(sni, client_cert)
         if not ok then
             return 503, err
@@ -547,7 +560,7 @@ function _M.check_upstream_conf(conf)
     return check_upstream_conf(false, conf)
 end
 
-
+-- parent可能是service或route
 local function filter_upstream(value, parent)
     if not value then
         return
@@ -564,6 +577,8 @@ local function filter_upstream(value, parent)
         return
     end
 
+    -- nodes如果是array, 仅仅更新parent.has_domain
+    -- nodes如果不是array, 改为array, 更新parent.has_domain
     local nodes = value.nodes
     if core.table.isarray(nodes) then
         for _, node in ipairs(nodes) do

@@ -68,7 +68,9 @@ local schema = {
         { required = { "response_schema" } }
     }
 }
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/mocking/
+-- 当执行该插件时，它将随机返回指定格式的模拟数据，并且请求不会转发到上游
+-- 可以根据schema随机生成响应；或根据变量替换生成响应；或加入delay
 local _M = {
     version = 0.1,
     priority = 10900,

@@ -172,7 +172,8 @@ local log_level = {
 local config = {}
 local log_buffer
 
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/error-log-logger/
+-- 将error.log推送到 TCP、Apache SkyWalking、Apache Kafka 或 ClickHouse 服务器
 local _M = {
     version = 0.1,
     priority = 1091,
@@ -232,7 +233,7 @@ local function send_to_tcp_server(data)
     return true
 end
 
-
+-- http协议发送至kafka
 local function send_to_skywalking(log_message)
     local err_msg
     local res = true
@@ -292,7 +293,7 @@ local function send_to_skywalking(log_message)
     return res, err_msg
 end
 
-
+-- 通过http协议发送
 local function send_to_clickhouse(log_message)
     local err_msg
     local res = true
@@ -343,7 +344,7 @@ local function send_to_clickhouse(log_message)
     return res, err_msg
 end
 
-
+-- 设置日志级别
 local function update_filter(value)
     local level = log_level[value.level]
     local status, err = errlog.set_filter_level(level)
@@ -407,7 +408,7 @@ local function send_to_kafka(log_message)
     return true
 end
 
-
+--发送日志
 local function send(data)
     if config.skywalking then
         return send_to_skywalking(data)
@@ -449,8 +450,11 @@ local function process()
 
     local err_level = log_level[metadata.value.level]
     local entries = {}
-    local logs = errlog.get_logs(9)
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/errlog.md
+    local logs = errlog.get_logs(9)     --最多返回9条
     while ( logs and #logs>0 ) do
+        -- { level1, time1, msg1, level2, time2, msg2, ... }
+        -- 每三个元素是一条日志
         for i = 1, #logs, 3 do
             -- There will be some stale error logs after the filter level changed.
             -- We should avoid reporting them.
@@ -467,12 +471,13 @@ local function process()
     end
 
     if log_buffer then
-        for _, v in ipairs(entries) do
+        for _, v in ipairs(entries) do  --所有的日志
             log_buffer:push(v)
         end
         return
     end
 
+    -- 需创建log_buffer
     local config_bat = {
         name = config.name,
         retry_delay = config.retry_delay,
@@ -498,6 +503,7 @@ end
 
 
 function _M.init()
+    -- 由特权进程处理
     timers.register_timer("plugin#error-log-logger", process)
 end
 

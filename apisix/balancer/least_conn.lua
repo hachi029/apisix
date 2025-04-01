@@ -30,7 +30,7 @@ end
 
 
 function _M.new(up_nodes, upstream)
-    local servers_heap = binaryHeap.minUnique(least_score)
+    local servers_heap = binaryHeap.minUnique(least_score)  --最小堆
     for server, weight in pairs(up_nodes) do
         local score = 1 / weight
         -- Note: the argument order of insert is different from others

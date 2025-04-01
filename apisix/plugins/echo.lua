@@ -50,7 +50,7 @@ local schema = {
 }
 
 local plugin_name = "echo"
-
+-- https://apisix.apache.org/zh/docs/apisix/plugins/echo/  插件开发的demo
 local _M = {
     version = 0.1,
     priority = 412,
@@ -68,7 +68,9 @@ function _M.check_schema(conf)
     return true
 end
 
-
+-- before_body: 在 body 属性之前添加的内容
+-- body: 覆盖上游返回的响应 body
+-- after_body: 在 body 属性之后添加的内容
 function _M.body_filter(conf, ctx)
     if conf.body then
         ngx.arg[1] = conf.body
@@ -80,6 +82,7 @@ function _M.body_filter(conf, ctx)
         ctx.plugin_echo_body_set = true
     end
 
+-- ngx.arg[2] 标识是否是最后一个chunk
     if ngx.arg[2] and conf.after_body then
         ngx.arg[1] = ngx.arg[1] .. conf.after_body
     end
@@ -88,7 +91,7 @@ end
 
 function _M.header_filter(conf, ctx)
     if conf.body or conf.before_body or conf.after_body then
-        core.response.clear_header_as_body_modified()
+        core.response.clear_header_as_body_modified()   -- 清除响应头 content_length content_encoding
     end
 
     if not conf.headers then
@@ -98,7 +101,7 @@ function _M.header_filter(conf, ctx)
     if not conf.headers_arr then
         conf.headers_arr = {}
 
-        for field, value in pairs(conf.headers) do
+        for field, value in pairs(conf.headers) do      -- 添加返回的响应头
             if type(field) == 'string'
                     and (type(value) == 'string' or type(value) == 'number') then
                 if #field == 0 then

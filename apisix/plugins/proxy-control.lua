@@ -31,6 +31,10 @@ local schema = {
 
 
 local plugin_name = "proxy-control"
+
+-- https://apisix.apache.org/zh/docs/apisix/plugins/proxy-control/
+-- 能够动态地控制 NGINX 代理的行为，动态设置 proxy_request_buffering  “request body” 缓存
+-- http://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_request_buffering
 local _M = {
     version = 0.1,
     priority = 21990,
@@ -53,6 +57,7 @@ function _M.rewrite(conf, ctx)
 
     local request_buffering = conf.request_buffering
     if request_buffering  ~= nil then
+        --通过ffi调用ngx_http_apisix_set_proxy_request_buffering
         local ok, err = apisix_ngx_client.set_proxy_request_buffering(request_buffering)
         if not ok then
             core.log.error("failed to set request_buffering: ", err)
