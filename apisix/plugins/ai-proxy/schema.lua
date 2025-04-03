@@ -42,43 +42,8 @@ local model_options_schema = {
             type = "string",
             description = "Model to execute.",
         },
-        max_tokens = {
-            type = "integer",
-            description = "Defines the max_tokens, if using chat or completion models.",
-            default = 256
-
-        },
-        input_cost = {
-            type = "number",
-            description = "Defines the cost per 1M tokens in your prompt.",
-            minimum = 0
-
-        },
-        output_cost = {
-            type = "number",
-            description = "Defines the cost per 1M tokens in the output of the AI.",
-            minimum = 0
-
-        },
-        temperature = {
-            type = "number",
-            description = "Defines the matching temperature, if using chat or completion models.",
-            minimum = 0.0,
-            maximum = 5.0,
-
-        },
-        top_p = {
-            type = "number",
-            description = "Defines the top-p probability mass, if supported.",
-            minimum = 0,
-            maximum = 1,
-
-        },
-        stream = {
-            description = "Stream response by SSE",
-            type = "boolean",
-        }
     },
+    additionalProperties = true,
 }
 
 local ai_instance_schema = {
@@ -120,7 +85,7 @@ local ai_instance_schema = {
                 },
             },
         },
-        required = {"name", "provider", "auth"}
+        required = {"name", "provider", "auth", "weight"}
     },
 }
 
@@ -139,8 +104,7 @@ _M.ai_proxy_schema = {
         timeout = {
             type = "integer",
             minimum = 1,
-            maximum = 60000,
-            default = 3000,
+            default = 30000,
             description = "timeout in milliseconds",
         },
         keepalive = {type = "boolean", default = true},
@@ -188,11 +152,15 @@ _M.ai_proxy_multi_schema = {
             default = { algorithm = "roundrobin" }
         },
         instances = ai_instance_schema,
+        fallback_strategy = {
+            type = "string",
+            enum = { "instance_health_and_rate_limiting" },
+            default = "instance_health_and_rate_limiting",
+        },
         timeout = {
             type = "integer",
             minimum = 1,
-            maximum = 60000,
-            default = 3000,
+            default = 30000,
             description = "timeout in milliseconds",
         },
         keepalive = {type = "boolean", default = true},
