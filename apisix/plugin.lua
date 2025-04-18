@@ -517,25 +517,39 @@ function _M.filter(ctx, conf, plugins, route_conf, phase)
             goto continue
         end
 
-        if not check_disable(plugin_conf) then -- 检查plugin_conf._meta.disable
-            -- https://apisix.apache.org/zh/docs/apisix/plugin-develop/#%E6%8F%92%E4%BB%B6%E5%91%BD%E5%90%8D%E4%BC%98%E5%85%88%E7%BA%A7%E5%92%8C%E5%85%B6%E4%BB%96
-            -- run_policy 字段可以用来控制插件执行。当这个字段设置成 prefer_route 时，
-            -- 且该插件同时配置在全局和路由级别，那么只有路由级别的配置生效。
-            -- 这里的逻辑处理prefer_route，如果全局和路由都配置了这个插件，且路由上的配置有效，则不执行此global插件
-            if plugin_obj.run_policy == "prefer_route" and route_plugin_conf ~= nil then
-                local plugin_conf_in_route = route_plugin_conf[name]
-                local disable_in_route = check_disable(plugin_conf_in_route)
-                if plugin_conf_in_route and not disable_in_route then
-                    goto continue
-                end
-            end
-
-            if plugin_conf._meta and plugin_conf._meta.priority then
-                custom_sort = true
-            end
-            core.table.insert(plugins, plugin_obj) -- plugin_obj 是从本地配置拿到的对象
-            core.table.insert(plugins, plugin_conf) --plugin_conf 是从etcd中用户配置的对象, 会被传入插件的rewrite/access等方法
+        if check_disable(plugin_conf) then    -- 检查plugin_conf._meta.disable
+            goto continue
         end
+
+        -- https://apisix.apache.org/zh/docs/apisix/plugin-develop/#%E6%8F%92%E4%BB%B6%E5%91%BD%E5%90%8D%E4%BC%98%E5%85%88%E7%BA%A7%E5%92%8C%E5%85%B6%E4%BB%96
+        -- run_policy 字段可以用来控制插件执行。当这个字段设置成 prefer_route 时，
+        -- 且该插件同时配置在全局和路由级别，那么只有路由级别的配置生效。
+        -- 这里的逻辑处理prefer_route，如果全局和路由都配置了这个插件，且路由上的配置有效，则不执行此global插件
+        if plugin_obj.run_policy == "prefer_route" and route_plugin_conf ~= nil then
+            local plugin_conf_in_route = route_plugin_conf[name]
+            local disable_in_route = check_disable(plugin_conf_in_route)
+            if plugin_conf_in_route and not disable_in_route then
+                goto continue
+            end
+        end
+
+        -- in the rewrite phase, the plugin executes in the following order:
+        -- 1. execute the rewrite phase of the plugins on route(including the auth plugins)
+        -- 2. merge plugins from consumer and route
+        -- 3. execute the rewrite phase of the plugins on consumer(phase: rewrite_in_consumer)
+        -- in this case, we need to skip the plugins that was already executed(step 1)
+        -- 在rewrite_in_consumer阶段，会跳过auth类型的插件，因为已经执行过了。
+        if phase == "rewrite_in_consumer"
+                and (not plugin_conf._from_consumer or plugin_obj.type == "auth") then
+            plugin_conf._skip_rewrite_in_consumer = true
+        end
+
+        if plugin_conf._meta and plugin_conf._meta.priority then
+            custom_sort = true
+        end
+
+        core.table.insert(plugins, plugin_obj)    -- plugin_obj 是从本地配置拿到的对象
+        core.table.insert(plugins, plugin_conf)   -- plugin_conf 是从etcd中用户配置的对象, 会被传入插件的rewrite/access等方法
 
         ::continue::
     end
@@ -554,15 +568,6 @@ function _M.filter(ctx, conf, plugins, route_conf, phase)
         for i = 1, #plugins, 2 do
             local plugin_obj = plugins[i]
             local plugin_conf = plugins[i + 1]
-
-            -- in the rewrite phase, the plugin executes in the following order:
-            -- 1. execute the rewrite phase of the plugins on route(including the auth plugins)
-            -- 2. merge plugins from consumer and route
-            -- 3. execute the rewrite phase of the plugins on consumer(phase: rewrite_in_consumer)
-            -- in this case, we need to skip the plugins that was already executed(step 1)
-            if phase == "rewrite_in_consumer" and not plugin_conf._from_consumer then
-                plugin_conf._skip_rewrite_in_consumer = true
-            end
 
             tmp_plugin_objs[plugin_conf] = plugin_obj
             core.table.insert(tmp_plugin_confs, plugin_conf)
@@ -1237,22 +1242,14 @@ function _M.run_plugin(phase, plugins, api_ctx)
         and phase ~= "body_filter"
         and phase ~= "delayed_body_filter"
     then
-        for i = 1, #plugins, 2 do   --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
-            local phase_func
-            -- 在rewrite_in_consumer阶段，会跳过auth类型的插件，因为已经执行过了。参考本文件_M.filter方法
-            if phase == "rewrite_in_consumer" then
-                if plugins[i].type == "auth" then
-                    plugins[i + 1]._skip_rewrite_in_consumer = true
-                end
-                phase_func = plugins[i]["rewrite"]
-            else
-                phase_func = plugins[i][phase]
-            end
+        for i = 1, #plugins, 2 do  --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
 
             if phase == "rewrite_in_consumer" and plugins[i + 1]._skip_rewrite_in_consumer then
                 goto CONTINUE
             end
 
+            local phase_func = phase == "rewrite_in_consumer" and plugins[i]["rewrite"]
+                               or plugins[i][phase]
             if phase_func then
                 local conf = plugins[i + 1]
                 -- 执行plugin_conf._meta.filter, filter是一个表达式  {["arg_version", "==", "v2"]}

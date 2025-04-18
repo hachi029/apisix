@@ -133,10 +133,13 @@ __DATA__
         content_by_lua_block {
             local plugin = require("apisix.plugins.ai-proxy-multi")
             local ok, err = plugin.check_schema({
-                providers = {
+                instances = {
                     {
-                        name = "openai",
-                        model = "gpt-4",
+                        name = "openai-official",
+                        provider = "openai",
+                        options = {
+                            model = "gpt-4",
+                        },
                         weight = 1,
                         auth = {
                             header = {
@@ -165,10 +168,13 @@ passed
         content_by_lua_block {
             local plugin = require("apisix.plugins.ai-proxy-multi")
             local ok, err = plugin.check_schema({
-                providers = {
+                instances = {
                     {
-                        name = "some-unique",
-                        model = "gpt-4",
+                        name = "self-hosted",
+                        provider = "some-unique",
+                        options = {
+                            model = "gpt-4",
+                        },
                         weight = 1,
                         auth = {
                             header = {
@@ -187,7 +193,7 @@ passed
         }
     }
 --- response_body eval
-qr/.*provider: some-unique is not supported.*/
+qr/.*property "provider" validation failed: matches none of the enum values*/
 
 
 
@@ -202,10 +208,10 @@ qr/.*provider: some-unique is not supported.*/
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy-multi": {
-                            "providers": [
+                            "instances": [
                                 {
-                                    "name": "openai",
-                                    "model": "gpt-4",
+                                    "name": "openai-official",
+                                    "provider": "openai",
                                     "weight": 1,
                                     "auth": {
                                         "header": {
@@ -213,6 +219,7 @@ qr/.*provider: some-unique is not supported.*/
                                         }
                                     },
                                     "options": {
+                                        "model": "gpt-4",
                                         "max_tokens": 512,
                                         "temperature": 1.0
                                     },
@@ -222,12 +229,6 @@ qr/.*provider: some-unique is not supported.*/
                                 }
                             ],
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                 }]]
@@ -265,10 +266,10 @@ Unauthorized
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy-multi": {
-                            "providers": [
+                            "instances": [
                                 {
-                                    "name": "openai",
-                                    "model": "gpt-4",
+                                    "name": "openai-official",
+                                    "provider": "openai",
                                     "weight": 1,
                                     "auth": {
                                         "header": {
@@ -276,6 +277,7 @@ Unauthorized
                                         }
                                     },
                                     "options": {
+                                        "model": "gpt-4",
                                         "max_tokens": 512,
                                         "temperature": 1.0
                                     },
@@ -285,12 +287,6 @@ Unauthorized
                                 }
                             ],
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                 }]]
@@ -360,23 +356,11 @@ prompt%3Dwhat%2520is%25201%2520%252B%25201
 Content-Type: application/x-www-form-urlencoded
 --- error_code: 400
 --- response_body chomp
-unsupported content-type: application/x-www-form-urlencoded
+unsupported content-type: application/x-www-form-urlencoded, only application/json is supported
 
 
 
-=== TEST 11: request schema validity check
---- request
-POST /anything
-{ "messages-missing": [ { "role": "system", "content": "xyz" } ] }
---- more_headers
-Authorization: Bearer token
---- error_code: 400
---- response_body chomp
-request format doesn't match schema: property "messages" is required
-
-
-
-=== TEST 12: model options being merged to request body
+=== TEST 11: model options being merged to request body
 --- config
     location /t {
         content_by_lua_block {
@@ -387,10 +371,10 @@ request format doesn't match schema: property "messages" is required
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy-multi": {
-                            "providers": [
+                            "instances": [
                                 {
-                                    "name": "openai",
-                                    "model": "some-model",
+                                    "name": "openai-official",
+                                    "provider": "openai",
                                     "weight": 1,
                                     "auth": {
                                         "header": {
@@ -398,6 +382,7 @@ request format doesn't match schema: property "messages" is required
                                         }
                                     },
                                     "options": {
+                                        "model": "some-model",
                                         "foo": "bar",
                                         "temperature": 1.0
                                     },
@@ -407,12 +392,6 @@ request format doesn't match schema: property "messages" is required
                                 }
                             ],
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                  }]]
@@ -450,7 +429,7 @@ options_works
 
 
 
-=== TEST 13: override path
+=== TEST 12: override path
 --- config
     location /t {
         content_by_lua_block {
@@ -461,10 +440,10 @@ options_works
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy-multi": {
-                            "providers": [
+                            "instances": [
                                 {
-                                    "name": "openai",
-                                    "model": "some-model",
+                                    "name": "openai-official",
+                                    "provider": "openai",
                                     "weight": 1,
                                     "auth": {
                                         "header": {
@@ -472,6 +451,7 @@ options_works
                                         }
                                     },
                                     "options": {
+                                        "model": "some-model",
                                         "foo": "bar",
                                         "temperature": 1.0
                                     },
@@ -481,12 +461,6 @@ options_works
                                 }
                             ],
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                  }]]
@@ -523,7 +497,7 @@ path override works
 
 
 
-=== TEST 14: set route with stream = true (SSE)
+=== TEST 13: set route with stream = true (SSE)
 --- config
     location /t {
         content_by_lua_block {
@@ -534,10 +508,10 @@ path override works
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy-multi": {
-                            "providers": [
+                            "instances": [
                                 {
-                                    "name": "openai",
-                                    "model": "gpt-35-turbo-instruct",
+                                    "name": "openai-official",
+                                    "provider": "openai",
                                     "weight": 1,
                                     "auth": {
                                         "header": {
@@ -545,6 +519,7 @@ path override works
                                         }
                                     },
                                     "options": {
+                                        "model": "gpt-35-turbo-instruct",
                                         "max_tokens": 512,
                                         "temperature": 1.0,
                                         "stream": true
@@ -555,12 +530,6 @@ path override works
                                 }
                             ],
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                  }]]
@@ -577,7 +546,7 @@ passed
 
 
 
-=== TEST 15: test is SSE works as expected
+=== TEST 14: test is SSE works as expected
 --- config
     location /t {
         content_by_lua_block {

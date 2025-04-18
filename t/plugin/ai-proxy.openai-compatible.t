@@ -132,29 +132,21 @@ __DATA__
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy": {
+                            "provider": "openai-compatible",
                             "auth": {
                                 "header": {
                                     "Authorization": "Bearer token"
                                 }
                             },
-                            "model": {
-                                "provider": "openai-compatible",
-                                "name": "custom",
-                                "options": {
-                                    "max_tokens": 512,
-                                    "temperature": 1.0
-                                }
+                            "options": {
+                                "model": "custom",
+                                "max_tokens": 512,
+                                "temperature": 1.0
                             },
                             "override": {
                                 "endpoint": "http://localhost:6724/v1/chat/completions"
                             },
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                 }]]
@@ -194,29 +186,21 @@ qr/\{ "content": "1 \+ 1 = 2\.", "role": "assistant" \}/
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy": {
+                            "provider": "openai-compatible",
                             "auth": {
                                 "header": {
                                     "Authorization": "Bearer token"
                                 }
                             },
-                            "model": {
-                                "provider": "openai-compatible",
-                                "name": "some-model",
-                                "options": {
-                                    "foo": "bar",
-                                    "temperature": 1.0
-                                }
+                            "options": {
+                                "model": "some-model",
+                                "foo": "bar",
+                                "temperature": 1.0
                             },
                             "override": {
                                 "endpoint": "http://localhost:6724/random"
                             },
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                 }]]
@@ -264,30 +248,22 @@ path override works
                     "uri": "/anything",
                     "plugins": {
                         "ai-proxy": {
+                            "provider": "openai-compatible",
                             "auth": {
                                 "header": {
                                     "Authorization": "Bearer token"
                                 }
                             },
-                            "model": {
-                                "provider": "openai-compatible",
-                                "name": "custom",
-                                "options": {
-                                    "max_tokens": 512,
-                                    "temperature": 1.0,
-                                    "stream": true
-                                }
+                            "options": {
+                                "model": "custom",
+                                "max_tokens": 512,
+                                "temperature": 1.0,
+                                "stream": true
                             },
                             "override": {
                                 "endpoint": "http://localhost:7737/v1/chat/completions"
                             },
                             "ssl_verify": false
-                        }
-                    },
-                    "upstream": {
-                        "type": "roundrobin",
-                        "nodes": {
-                            "canbeanything.com": 1
                         }
                     }
                 }]]
@@ -343,22 +319,3 @@ passed
                 ngx.say(err)
                 return
             end
-
-            local final_res = {}
-            while true do
-                local chunk, err = res.body_reader() -- will read chunk by chunk
-                if err then
-                    core.log.error("failed to read response chunk: ", err)
-                    break
-                end
-                if not chunk then
-                    break
-                end
-                core.table.insert_tail(final_res, chunk)
-            end
-
-            ngx.print(#final_res .. final_res[6])
-        }
-    }
---- response_body_like eval
-qr/6data: \[DONE\]\n\n/

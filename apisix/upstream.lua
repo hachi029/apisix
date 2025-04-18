@@ -82,6 +82,9 @@ _M.set = set_directly
 
 -- 销毁健康检查器
 local function release_checker(healthcheck_parent)
+    if not healthcheck_parent or not healthcheck_parent.checker then
+        return
+    end
     local checker = healthcheck_parent.checker
     core.log.info("try to release checker: ", tostring(checker))
     checker:delayed_clear(3)
@@ -265,7 +268,6 @@ local function fill_node_info(up_conf, scheme, is_stream)
 end
 
 -- service_name 与nodes 二选一，用于服务发现； 如果node个数>1, 创建健康检查器
---
 function _M.set_by_route(route, api_ctx)
     if api_ctx.upstream_conf then
         -- upstream_conf has been set by traffic-split plugin
@@ -334,6 +336,7 @@ function _M.set_by_route(route, api_ctx)
 
     local nodes_count = up_conf.nodes and #up_conf.nodes or 0
     if nodes_count == 0 then
+        release_checker(up_conf.parent)
         return HTTP_CODE_UPSTREAM_UNAVAILABLE, "no valid upstream node"
     end
 
@@ -370,10 +373,8 @@ function _M.set_by_route(route, api_ctx)
         return 503, err
     end
 
-    if nodes_count > 1 then
-        local checker = fetch_healthchecker(up_conf) -- 如果upstream配置了健康检查，创建健康检查器
-        api_ctx.up_checker = checker
-    end
+    local checker = fetch_healthchecker(up_conf)
+    api_ctx.up_checker = checker
 
     -- ssl相关
     local scheme = up_conf.scheme
