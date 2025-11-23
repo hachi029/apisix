@@ -22,9 +22,14 @@
 local lru_new = require("resty.lrucache").new
 local resty_lock = require("resty.lock")
 local log = require("apisix.core.log")
+local pairs = pairs
+local pcall = pcall
+local unpack = unpack
 local tostring = tostring
 local ngx = ngx
 local get_phase = ngx.get_phase
+local timer_every = ngx.timer.every
+local exiting = ngx.worker.exiting
 
 
 local lock_shdict_name = "lrucache-lock"
@@ -42,33 +47,44 @@ local can_yield_phases = {
     timer = true
 }
 
+local stale_obj_pool = {}
+
 local GLOBAL_ITEMS_COUNT = 1024
 local GLOBAL_TTL         = 60 * 60          -- 60 min
 local PLUGIN_TTL         = 5 * 60           -- 5 min
 local PLUGIN_ITEMS_COUNT = 8
 local global_lru_fun
 
--- lru_obj: resty.lrucache(item_count)
--- invalid_stale: 过期对象是否无效，如果否，过期的对象会被重新设置ttl并返回
--- item_ttl: 对象的ttl
--- item_release: item从缓存中释放的回调 （几乎没有场景传这个参数）
--- key: lru key,
--- version: obj附加字段version. 如果指定了version, 只有version一致，才会返回key对应的对象
-local function fetch_valid_cache(lru_obj, invalid_stale, item_ttl,
-                                 item_release, key, version)
-    local obj, stale_obj = lru_obj:get(key)     -- stale_obj, 过期的obj
-    if obj and obj.ver == version then  --版本一致
+
+    -- lru_obj: resty.lrucache(item_count)
+    -- invalid_stale: 过期对象是否无效，如果否，过期的对象会被重新设置ttl并返回
+    -- item_ttl: 对象的ttl
+    -- item_release: item从缓存中释放的回调 （几乎没有场景传这个参数）
+    -- key: lru key,
+    -- version: obj附加字段version. 如果指定了version, 只有version一致，才会返回key对应的对象
+
+local function fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
+                                 key, version, create_obj_fun, ...)
+    local obj, stale_obj = lru_obj:get(key)
+    if obj and obj.ver == version then
         return obj
     end
 
-    -- 如果允许返回过期对象
-    if not invalid_stale and stale_obj and stale_obj.ver == version then
-        lru_obj:set(key, stale_obj, item_ttl)
-        return stale_obj
-    end
+    if stale_obj and stale_obj.ver == version then
+        if not invalid_stale then
+            lru_obj:set(key, stale_obj, item_ttl)
+            return stale_obj
+        end
 
-    if item_release and obj then   -- 对象未过期但版本不一致，调用释放方法对obj进行释放
-        item_release(obj.val)
+        if refresh_stale then
+            stale_obj_pool[lru_obj][key] = {
+                fn = create_obj_fun,
+                args = {...},
+                ver = version,
+                ttl = item_ttl,
+            }
+            return stale_obj
+        end
     end
 
     return nil
@@ -91,16 +107,30 @@ local function new_lru_fun(opts)
         item_ttl = opts and opts.ttl or GLOBAL_TTL  --60 min
     end
 
-    local item_release = opts and opts.release
     local invalid_stale = opts and opts.invalid_stale
+    local refresh_stale = opts and opts.refresh_stale
     local serial_creating = opts and opts.serial_creating
     local lru_obj = lru_new(item_count)
 
+    local neg_lru_obj
+    if opts and opts.neg_ttl and opts.neg_count then
+        neg_lru_obj = lru_new(opts.neg_count)
+    end
+
+    stale_obj_pool[lru_obj] = {}
     -- key: 缓存key; version: 缓存版本; create_obj_fun: 如果缓存不存在，创建方法; ... create_obj_fun参数
-    return function (key, version, create_obj_fun, ...)     --缓存获取元素的方法
-        if not serial_creating or not can_yield_phases[get_phase()] then --允许并发创建且执行过程不能被阻塞
-            local cache_obj = fetch_valid_cache(lru_obj, invalid_stale,
-                                item_ttl, item_release, key, version)
+    return function (key, version, create_obj_fun, ...)      --缓存获取元素的方法
+        -- check negative cache first
+        if neg_lru_obj then
+            local neg_obj = neg_lru_obj:get(key)
+            if neg_obj and neg_obj.ver == version then
+                return nil, neg_obj.err
+            end
+        end
+
+        if not serial_creating or not can_yield_phases[get_phase()] then
+            local cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale,
+                                item_ttl, key, version, create_obj_fun, ...)
             if cache_obj then
                 return cache_obj.val
             end
@@ -108,14 +138,18 @@ local function new_lru_fun(opts)
             local obj, err = create_obj_fun(...)    --缓存里没找到，创建对象
             if obj ~= nil then
                 lru_obj:set(key, {val = obj, ver = version}, item_ttl)
+            elseif neg_lru_obj then
+                -- cache the failure in negative cache
+                neg_lru_obj:set(key, {err = err, ver = version}, opts.neg_ttl)
             end
 
             return obj, err
         end
 
         -- 执行过程允许阻塞且不允许并发创建对象
-        local cache_obj = fetch_valid_cache(lru_obj, invalid_stale, item_ttl,
-                            item_release, key, version)
+
+        local cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
+                            key, version, create_obj_fun, ...)
         if cache_obj then
             return cache_obj.val
         end
@@ -133,9 +167,10 @@ local function new_lru_fun(opts)
             return nil, "failed to acquire the lock: " .. err
         end
 
-        cache_obj = fetch_valid_cache(lru_obj, invalid_stale, item_ttl,
-                        nil, key, version)
-        if cache_obj then   --说明有其他协程已经创建了obj
+        cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
+                        key, version, create_obj_fun, ...)
+        --说明有其他协程已经创建了obj
+        if cache_obj then
             lock:unlock()
             log.info("unlock with key ", key_s)
             return cache_obj.val
@@ -144,6 +179,9 @@ local function new_lru_fun(opts)
         local obj, err = create_obj_fun(...)
         if obj ~= nil then
             lru_obj:set(key, {val = obj, ver = version}, item_ttl)
+        elseif neg_lru_obj then
+            -- cache the failure in negative cache
+            neg_lru_obj:set(key, {err = err, ver = version}, opts.neg_ttl)
         end
         lock:unlock()
         log.info("unlock with key ", key_s)
@@ -195,8 +233,45 @@ local function plugin_ctx_id(api_ctx, extra_key)
 end
 
 
+local function refresh_stale_objs()
+    for lru_obj, keys in pairs(stale_obj_pool) do
+        for key, new_obj in pairs(keys) do
+            local obj, err = new_obj.fn(unpack(new_obj.args))
+            if obj ~= nil then
+                lru_obj:set(key, {val = obj, ver = new_obj.ver}, new_obj.ttl)
+                keys[key] = nil
+                log.info("successfully refresh stale obj for key ",
+                            tostring(key), " to ver ", new_obj.ver)
+            else
+                log.error("failed to refresh stale obj for key ", key, ": ", err)
+            end
+        end
+    end
+end
+
+
+local function init_worker()
+    local running = false
+    timer_every(1, function ()
+        if not exiting() then
+            if running then
+                log.info("timer_refresh_stale is already running, skipping this iteration")
+                return
+            end
+            running = true
+            local ok, err = pcall(refresh_stale_objs)
+            if not ok then
+                log.error("failed to run timer_refresh_stale: ", err)
+            end
+            running = false
+        end
+    end)
+end
+
+
 local _M = {
     version = 0.1,
+    init_worker = init_worker,
     new = new_lru_fun,
     global = global_lru_fun,
     plugin_ctx = plugin_ctx,

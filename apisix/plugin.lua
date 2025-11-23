@@ -23,6 +23,8 @@ local expr          = require("resty.expr.v1")
 local apisix_ssl    = require("apisix.ssl")
 local re_split      = require("ngx.re").split
 local ngx           = ngx
+local ngx_ok        = ngx.OK
+local ngx_print     = ngx.print
 local crc32         = ngx.crc32_short
 local ngx_exit      = ngx.exit
 local pkg_loaded    = package.loaded
@@ -33,6 +35,8 @@ local pairs         = pairs
 local type          = type
 local tostring      = tostring
 local error         = error
+local getmetatable  = getmetatable
+local setmetatable  = setmetatable
 -- make linter happy to avoid error: getting the Lua global "load"
 -- luacheck: globals load, ignore lua_load
 local lua_load          = load
@@ -356,9 +360,6 @@ function _M.load(config)
         return local_plugins
     end
 
-    -- exporter插件的特殊处理
-    local exporter = require("apisix.plugins.prometheus.exporter")
-
     if ngx.config.subsystem == "http" then
         if not http_plugin_names then
             core.log.error("failed to read plugin list from local file")
@@ -371,15 +372,6 @@ function _M.load(config)
             local ok, err = load(http_plugin_names, wasm_plugin_names)
             if not ok then
                 core.log.error("failed to load plugins: ", err)
-            end
-
-            local enabled = core.table.array_find(http_plugin_names, "prometheus") ~= nil
-            local active  = exporter.get_prometheus() ~= nil
-            if not enabled then
-                exporter.destroy()
-            end
-            if enabled and not active then
-                exporter.http_init()
             end
         end
     end
@@ -633,7 +625,7 @@ end
 -- return new_conf
 local function merge_service_route(service_conf, route_conf)
     -- new_conf是合并后的结果。
-    local new_conf = core.table.deepcopy(service_conf, { shallows = {"self.value.upstream.parent"}})
+    local new_conf = core.table.deepcopy(service_conf)
     new_conf.value.service_id = new_conf.value.id
     new_conf.value.id = route_conf.value.id
     new_conf.modifiedIndex = route_conf.modifiedIndex
@@ -652,8 +644,6 @@ local function merge_service_route(service_conf, route_conf)
     local route_upstream = route_conf.value.upstream
     if route_upstream then
         new_conf.value.upstream = route_upstream
-        -- when route's upstream override service's upstream,
-        -- the upstream.parent still point to the route
         new_conf.value.upstream_id = nil
         new_conf.has_domain = route_conf.has_domain
     end
@@ -712,7 +702,7 @@ end
 local function merge_service_stream_route(service_conf, route_conf)
     -- because many fields in Service are not supported by stream route,
     -- so we copy the stream route as base object
-    local new_conf = core.table.deepcopy(route_conf, { shallows = {"self.value.upstream.parent"}})
+    local new_conf = core.table.deepcopy(route_conf)
     if service_conf.value.plugins then
         for name, conf in pairs(service_conf.value.plugins) do
             if not new_conf.value.plugins then
@@ -762,8 +752,7 @@ local function merge_consumer_route(route_conf, consumer_conf, consumer_group_co
         return route_conf
     end
 
-    local new_route_conf = core.table.deepcopy(route_conf,
-                            { shallows = {"self.value.upstream.parent"}})
+    local new_route_conf = core.table.deepcopy(route_conf)
 
     if consumer_group_conf then
         for name, conf in pairs(consumer_group_conf.value.plugins) do
@@ -778,6 +767,7 @@ local function merge_consumer_route(route_conf, consumer_conf, consumer_group_co
         end
     end
 
+
     for name, conf in pairs(consumer_conf.plugins) do
         if not new_route_conf.value.plugins then
             new_route_conf.value.plugins = {}
@@ -790,7 +780,6 @@ local function merge_consumer_route(route_conf, consumer_conf, consumer_group_co
         new_route_conf.value.plugins[name] = conf
     end
 
-    core.log.info("merged conf : ", core.json.delay_encode(new_route_conf))
     return new_route_conf
 end
 
@@ -798,7 +787,6 @@ end
 -- return new_conf, new_conf ~= route_conf。 只有当consumer上没配置插件时，new_conf == route_conf
 function _M.merge_consumer_route(route_conf, consumer_conf, consumer_group_conf, api_ctx)
     core.log.info("route conf: ", core.json.delay_encode(route_conf))
-    core.log.info("consumer conf: ", core.json.delay_encode(consumer_conf))
     core.log.info("consumer group conf: ", core.json.delay_encode(consumer_group_conf))
 
     local flag = route_conf.value.id .. "#" .. route_conf.modifiedIndex
@@ -856,20 +844,24 @@ do
     end
 end
 
+
 -- 1加载插件；2 启动持续同步etcd目录更新任务： /plugins /plugin_metadata
-function _M.init_worker()
+function _M.init_prometheus()
     local _, http_plugin_names, stream_plugin_names = get_plugin_names()
+    local enabled_in_http = core.table.array_find(http_plugin_names, "prometheus")
+    local enabled_in_stream = core.table.array_find(stream_plugin_names, "prometheus")
 
     -- prometheus插件初始化
-    -- some plugins need to be initialized in init* phases
-    if is_http and core.table.array_find(http_plugin_names, "prometheus") then
-        local prometheus_enabled_in_stream =
-            core.table.array_find(stream_plugin_names, "prometheus")
-        require("apisix.plugins.prometheus.exporter").http_init(prometheus_enabled_in_stream)
-    elseif not is_http and core.table.array_find(stream_plugin_names, "prometheus") then
-        require("apisix.plugins.prometheus.exporter").stream_init()
+    -- For stream-only mode, there are separate calls in ngx_tpl.lua.
+    -- And for other modes, whether in stream or http plugins,
+    -- the prometheus exporter needs to be initialized.
+    if is_http and (enabled_in_http or enabled_in_stream) then
+        require("apisix.plugins.prometheus.exporter").init_exporter_timer()
     end
+end
 
+
+function _M.init_worker()
     -- someone's plugin needs to be initialized after prometheus
     -- see https://github.com/apache/apisix/issues/3286
     -- 根据conf.yaml里配置，加载插件，执行插件的init方法
@@ -946,8 +938,6 @@ end
 
 
 local function check_single_plugin_schema(name, plugin_conf, schema_type, skip_disabled_plugin)
-    core.log.info("check plugin schema, name: ", name, ", configurations: ",
-        core.json.delay_encode(plugin_conf, true))
     if type(plugin_conf) ~= "table" then
         return false, "invalid plugin conf " ..
             core.json.encode(plugin_conf, true) ..
@@ -957,6 +947,8 @@ local function check_single_plugin_schema(name, plugin_conf, schema_type, skip_d
     local plugin_obj = local_plugins_hash[name]
     if not plugin_obj then
         if skip_disabled_plugin then
+            core.log.warn("skipping check schema for disabled or unknown plugin [",
+                                    name, "]. Enable the plugin or modify configuration")
             return true
         else
             return false, "unknown plugin [" .. name .. "]"
@@ -1006,6 +998,7 @@ local function enable_gde()
 
     return enable_data_encryption
 end
+_M.enable_gde = enable_gde
 
 
 local function get_plugin_schema_for_gde(name, schema_type)
@@ -1309,6 +1302,30 @@ function _M.run_plugin(phase, plugins, api_ctx)
     return api_ctx, plugin_run
 end
 
+function _M.set_plugins_meta_parent(plugins, parent)
+    if not plugins then
+        return
+    end
+    for _, plugin_conf in pairs(plugins) do
+        if not plugin_conf._meta then
+            plugin_conf._meta = {}
+        end
+        if not plugin_conf._meta.parent then
+            local parent_info = {
+                resource_key = parent.key,
+                resource_version = tostring(parent.modifiedIndex)
+            }
+            local mt_table = getmetatable(plugin_conf._meta)
+            if mt_table then
+                mt_table.parent = parent_info
+            else
+                plugin_conf._meta = setmetatable(plugin_conf._meta,
+                                                    { __index = {parent = parent_info} })
+            end
+        end
+    end
+end
+
 
 -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
 -- 一个global_rule可以包含多个插件
@@ -1347,6 +1364,41 @@ function _M.run_global_rules(api_ctx, global_rules, phase_name)
         api_ctx.conf_version = orig_conf_version
         api_ctx.conf_id = orig_conf_id
     end
+end
+
+function _M.lua_response_filter(api_ctx, headers, body)
+    local plugins = api_ctx.plugins
+    if not plugins or #plugins == 0 then
+        -- if there is no any plugin, just print the original body to downstream
+        ngx_print(body)
+        return
+    end
+    for i = 1, #plugins, 2 do
+        local phase_func = plugins[i]["lua_body_filter"]
+        if phase_func then
+            local conf = plugins[i + 1]
+            if not meta_filter(api_ctx, plugins[i]["name"], conf)then
+                goto CONTINUE
+            end
+
+            run_meta_pre_function(conf, api_ctx, plugins[i]["name"])
+            local code, new_body = phase_func(conf, api_ctx, headers, body)
+            if code then
+                if code ~= ngx_ok then
+                    ngx.status = code
+                end
+
+                ngx_print(new_body)
+                ngx_exit(ngx_ok)
+            end
+            if new_body then
+                body = new_body
+            end
+        end
+
+        ::CONTINUE::
+    end
+    ngx_print(body)
 end
 
 

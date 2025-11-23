@@ -38,6 +38,12 @@ local function check_conf(id, conf, need_id)
 end
 
 -- 插件里是否配置了upstream_id, 当前只有traffic-split插件支持配置 upstream_id
+
+local function encrypt_conf(id, conf)
+    apisix_upstream.encrypt_conf(conf)
+end
+
+
 local function up_id_in_plugins(plugins, up_id)
     if plugins and plugins["traffic-split"]
         and plugins["traffic-split"].rules then
@@ -132,5 +138,6 @@ return resource.new({
     kind = "upstream",
     schema = core.schema.upstream,
     checker = check_conf,
+    encrypt_conf = encrypt_conf,
     delete_checker = delete_checker
 })

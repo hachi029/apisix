@@ -15,6 +15,11 @@
 -- limitations under the License.
 --
 
+local type              = type
+local pairs             = pairs
+local tonumber          = tonumber
+local ngx               = ngx
+local re_find           = ngx.re.find
 local fetch_local_conf  = require("apisix.core.config_local").local_conf
 local try_read_attr     = require("apisix.core.table").try_read_attr
 local deepcopy          = require("apisix.core.table").deepcopy
@@ -22,9 +27,6 @@ local log               = require("apisix.core.log")
 local request           = require("apisix.core.request")
 local response          = require("apisix.core.response")
 local table             = require("apisix.core.table")
-local tonumber          = tonumber
-local re_find           = ngx.re.find
-local pairs             = pairs
 
 local _M = {}
 
@@ -119,12 +121,45 @@ local function pagination(body, args)
     body.list = res
 end
 
+
 --查询条件过滤， 支持label、name、uri正则匹配过滤
-local function filter(body, args)
-    if not args.name and not args.label and not args.uri then
-        return
+local function _filter(item, args, resource)
+    if not args.filter then
+        return true
     end
 
+    local filters, err = ngx.decode_args(args.filter or "", 100)
+    if not filters then
+        log.error("failed to decode filter args: ", err)
+        return false
+    end
+
+    for key, value in pairs(filters) do
+        if not resource.list_filter_fields[key] then
+            log.warn("filter field '", key, "' is not supported by resource: ", resource.name)
+            goto CONTINUE
+        end
+
+        if not item[key] then
+            return false
+        end
+
+        if type(value) == "table" then
+            value = value[#value] -- get the last value in the table
+        end
+
+        if item[key] ~= value then
+            return false
+        end
+
+        ::CONTINUE::
+    end
+
+    return true
+end
+
+
+local function filter(body, args, resource)
     for i = #body.list, 1, -1 do
         local name_matched = true
         local label_matched = true
@@ -168,16 +203,18 @@ local function filter(body, args)
             end
         end
 
-        if not name_matched or not label_matched or not uri_matched then
+        if not name_matched or not label_matched or not uri_matched
+                            or not _filter(body.list[i].value, args, resource) then
             table.remove(body.list, i)
         end
     end
 end
 
+
 -- 支持查询条件（label、name、uri）
 -- 支持分页
 -- https://apisix.apache.org/zh/docs/apisix/admin-api/#v3-new-function
-function _M.filter(body)
+function _M.filter(body, resource)
     if not enable_v3() then
         return body
     end
@@ -196,7 +233,8 @@ function _M.filter(body)
 
     -- filter and paging logic for list query only
     if processed_body.list then
-        filter(processed_body, args)    --查询条件过滤， 支持label、name、uri正则匹配过滤
+        --查询条件过滤， 支持label、name、uri正则匹配过滤
+        filter(processed_body, args, resource)
 
         -- calculate the total amount of filtered data
         processed_body.total = processed_body.list and #processed_body.list or 0

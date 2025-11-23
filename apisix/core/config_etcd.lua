@@ -28,11 +28,10 @@ local etcd_apisix  = require("apisix.core.etcd")
 local core_str     = require("apisix.core.string")
 local new_tab      = require("table.new")
 local inspect      = require("inspect")
-local errlog       = require("ngx.errlog")
-local log_level    = errlog.get_sys_filter_level()
-local NGX_INFO     = ngx.INFO
+local process      = require("ngx.process")
 local check_schema = require("apisix.core.schema").check
 local exiting      = ngx.worker.exiting
+local worker_id    = ngx.worker.id
 local insert_tab   = table.insert
 local type         = type
 local ipairs       = ipairs
@@ -40,6 +39,7 @@ local setmetatable = setmetatable
 local ngx_sleep    = require("apisix.core.utils").sleep
 local ngx_timer_at = ngx.timer.at
 local ngx_time     = ngx.time
+local ngx          = ngx
 local sub_str      = string.sub
 local tostring     = tostring
 local tonumber     = tonumber
@@ -65,12 +65,15 @@ local err_etcd_grpc_engine_timeout = "context deadline exceeded"
 local err_etcd_grpc_ngx_timeout = "timeout"
 local err_etcd_unhealthy_all = "has no healthy etcd endpoint available"
 local health_check_shm_name = "etcd-cluster-health-check"
+local status_report_shared_dict_name = "status-report"
 if not is_http then
     health_check_shm_name = health_check_shm_name .. "-stream"
 end
 local created_obj  = {}     -- key为/routes 或 /upstream 等， value 为 new(key, opts) 返回的对象
 local loaded_configuration = {} -- init_by_lua 阶段拉取的所有etcd的配置
+local configuration_loaded_time
 local watch_ctx -- main watch 上下文
+
 
 --总体思路是main-sub watch。 main-watch监听/apisix目录下所有更新，将更新保存到watch_ctx.res中，
 -- 然后通知所有sub-watch去处理数据。只有main-watch与etcd交互。
@@ -118,9 +121,6 @@ end
 -- 将watch到的数据存入watch_ctx.res，通知sub watch处理数据
 -- append res to the queue and notify pending watchers
 local function produce_res(res, err)
-    if log_level >= NGX_INFO then
-        log.info("append res: ", inspect(res), ", err: ", inspect(err))
-    end
     insert_tab(watch_ctx.res, {res=res, err=err})
     for _, sema in pairs(watch_ctx.sema) do
         sema:post()
@@ -189,6 +189,18 @@ local function do_run_watch(premature)
     opts.need_cancel = true
     opts.start_revision = watch_ctx.rev
 
+    -- get latest revision
+    local res, err = watch_ctx.cli:readdir(watch_ctx.prefix .. "/phantomkey")
+    if err then
+        log.error("failed to get latest revision, err: ", err)
+    end
+    local latest_rev
+    if res and res.body and res.body.header and res.body.header.revision then
+        latest_rev = tonumber(res.body.header.revision)
+    else
+        log.error("failed to get latest revision, res: ", json.delay_encode(res))
+    end
+
     log.info("restart watchdir: start_revision=", opts.start_revision)
 
     local res_func, err, http_cli = watch_ctx.cli:watchdir(watch_ctx.prefix, opts)
@@ -201,9 +213,6 @@ local function do_run_watch(premature)
     ::watch_event::
     while true do
         local res, err = res_func()
-        if log_level >= NGX_INFO then
-            log.info("res_func: ", inspect(res))
-        end
         -- 1.错误处理
         if not res then
             if err ~= "closed" and
@@ -211,6 +220,12 @@ local function do_run_watch(premature)
                 err ~= "broken pipe"
             then
                 log.error("wait watch event: ", err)
+            end
+            if err == "timeout" then
+                if latest_rev and watch_ctx.rev < latest_rev + 1 then
+                    watch_ctx.rev = latest_rev + 1
+                    log.info("etcd watch timeout, upgrade revision to ", watch_ctx.rev)
+                end
             end
             cancel_watch(http_cli)
             break
@@ -222,10 +237,21 @@ local function do_run_watch(premature)
             break
         end
 
-        if res.result.created then
-            goto watch_event
-        end
-
+        --[[
+        when etcd response permission denied, both result.canceled and result.created are true,
+        so we need to check result.canceled first, for example:
+        result = {
+          cancel_reason = "rpc error: code = PermissionDenied desc = etcdserver: permission denied",
+          canceled = true,
+          created = true,
+          header = {
+            cluster_id = "14841639068965178418",
+            member_id = "10276657743932975437",
+            raft_term = "4",
+            revision = "33"
+          }
+        }
+        --]]
         if res.result.canceled then
             log.warn("watch canceled by etcd, res: ", inspect(res))
             if res.result.compact_revision then
@@ -239,6 +265,11 @@ local function do_run_watch(premature)
 
         -- 2.cleanup, 此处也可以保证未被 watch的 res被清理掉，避免未消费的res持续占用内存
         -- 找到watch_ctx.idx中最小项 min_idx = min(watch_ctx.idx)
+        if res.result.created then
+            goto watch_event
+        end
+
+        -- cleanup
         local min_idx = 0
         for _, idx in pairs(watch_ctx.idx) do
             if (min_idx == 0) or (idx < min_idx) then
@@ -442,9 +473,6 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
             end
 
             if res2 then
-                if log_level >= NGX_INFO then
-                    log.info("http_waitdir: ", inspect(res2))
-                end
                 return res2
             end
         end
@@ -474,6 +502,17 @@ end
 
 -- sub watch指定目录
 -- return dir_res, err
+
+local function is_bulk_operation(dir_res)
+    if not dir_res or not dir_res.body or not dir_res.body.node then
+        return false
+    end
+    if #dir_res.body.node > 1 then
+        return true
+    end
+    return false
+end
+
 local function waitdir(self)
     local etcd_cli = self.etcd_cli
     local key = self.key
@@ -506,6 +545,23 @@ end
 -- 3.self.values_hash保存的是id->self.values的array index的映射
 -- 4.执行filter(item) 各组件实际是通过filter函数回调来创建真实的route、service、upstream、plugin等待
 -- 如路由的filter apisix/router.lua:28 filter
+local function sync_status_to_shdict(status)
+    local local_conf = config_local.local_conf()
+    if not local_conf.apisix.status then
+        return
+    end
+    if process.type() ~= "worker" then
+        return
+    end
+    local status_shdict = ngx.shared[status_report_shared_dict_name]
+    if not status_shdict then
+        return
+    end
+    local id = worker_id()
+    status_shdict:set(id, status)
+end
+
+
 local function load_full_data(self, dir_res, headers)
     local err
     local changed = false
@@ -577,6 +633,8 @@ local function load_full_data(self, dir_res, headers)
             end
 
             if data_valid and self.checker then
+                -- TODO: An opts table should be used
+                -- as different checkers may use different parameters
                 data_valid, err = self.checker(item.value, item.key)
                 if not data_valid then
                     log.error("failed to check item data of [", self.key,
@@ -611,6 +669,7 @@ local function load_full_data(self, dir_res, headers)
     end
 
     self.need_reload = false
+    sync_status_to_shdict(true)
 end
 
 
@@ -667,8 +726,9 @@ local function sync_data(self)
 
     local dir_res, err = waitdir(self)
     log.info("waitdir key: ", self.key, " prev_index: ", self.prev_index + 1)
-    log.info("res: ", json.delay_encode(dir_res, true), ", err: ", err)
-
+    if is_bulk_operation(dir_res) then
+        log.info("etcd events sent in bulk")
+    end
     if not dir_res then
         if err == "compacted" or err == "restarted" then
             self.need_reload = true
@@ -1012,7 +1072,6 @@ function _M.new(key, opts)
     if not health_check_timeout or health_check_timeout < 0 then
         health_check_timeout = 10
     end
-
     local automatic = opts and opts.automatic
     local item_schema = opts and opts.item_schema
     local filter_fun = opts and opts.filter  -- 在配置更新时被调用，Add or Delete or Update
@@ -1029,7 +1088,7 @@ function _M.new(key, opts)
         sync_times = 0,
         running = true,
         conf_version = 0,
-        values = nil,
+        values = {},
         need_reload = true,
         watching_stream = nil,
         routes_hash = nil,
@@ -1154,6 +1213,23 @@ local function create_formatter(prefix)
 end
 
 --init_by_lua -> apisix.http_init-->core.config.init()
+
+local function init_loaded_configuration()
+    loaded_configuration = {}
+    local etcd_cli, prefix, err = etcd_apisix.new_without_proxy()
+    if not etcd_cli then
+        return "failed to start a etcd instance: " .. err
+    end
+
+    local res, err = readdir(etcd_cli, prefix, create_formatter(prefix))
+    if not res then
+        return err
+    end
+
+    configuration_loaded_time = ngx_time()
+end
+
+
 function _M.init()
     local local_conf, err = config_local.local_conf()
     if not local_conf then
@@ -1164,14 +1240,8 @@ function _M.init()
         return true
     end
 
-    -- don't go through proxy during start because the proxy is not available
-    local etcd_cli, prefix, err = etcd_apisix.new_without_proxy()
-    if not etcd_cli then
-        return nil, "failed to start a etcd instance: " .. err
-    end
-    -- 读取/apisix目录下所有数据。保存到本地全局变量loaded_configuration中
-    local res, err = readdir(etcd_cli, prefix, create_formatter(prefix))
-    if not res then
+    local err = init_loaded_configuration()
+    if err then
         return nil, err
     end
 
@@ -1181,13 +1251,24 @@ end
 -- 没做啥事
 -- init_worker_by_lua -> apisix.http_init_worker-->core.config.init_worker()
 function _M.init_worker()
+    sync_status_to_shdict(false)
     local local_conf, err = config_local.local_conf()
     if not local_conf then
         return nil, err
     end
 
-    if table.try_read_attr(local_conf, "apisix", "disable_sync_configuration_during_start") then
-        return true
+    local threshold = table.try_read_attr(local_conf, "apisix",
+                                    "worker_startup_time_threshold") or 60
+    -- if the startup time of a worker differs significantly from that of the master process,
+    -- we consider it to have restarted, and at this point,
+    -- it is necessary to reload the full configuration from etcd.
+    if configuration_loaded_time and ngx_time() - configuration_loaded_time > threshold then
+        log.warn("master process has been running for a long time, ",
+                     "reloading the full configuration from etcd for this new worker")
+        local err = init_loaded_configuration()
+        if err then
+            return nil, err
+        end
     end
 
     return true

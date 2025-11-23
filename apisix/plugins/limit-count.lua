@@ -34,18 +34,18 @@ end
 
 
 function _M.access(conf, ctx)
-    conf = fetch_secrets(conf, true, conf, "")
+    conf = fetch_secrets(conf, true)
     return limit_count.rate_limit(conf, ctx, plugin_name, 1)
 end
 
 -- plugin初始化时调用。配合workflow插件
 function _M.workflow_handler()
     workflow.register(plugin_name,
-    function (conf, ctx)
-        return limit_count.rate_limit(conf, ctx, plugin_name, 1)
-    end,
     function (conf)
         return limit_count.check_schema(conf)
+    end,
+    function (conf, ctx)
+        return limit_count.rate_limit(conf, ctx, plugin_name, 1)
     end)
 end
 
