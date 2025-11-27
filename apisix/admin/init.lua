@@ -68,6 +68,7 @@ local _M = {version = 0.4}
 local router
 
 
+-- 检查admin-api 请求的token
 local function check_token(ctx)
     local local_conf = core.config.local_conf()
 
@@ -285,6 +286,7 @@ local function unsupported_methods_reload_plugin()
 end
 
 
+-- 插件热加载， admin-api /apisix/admin/plugins/reload 的handler
 local function post_reload_plugins()
     set_ctx_and_check_token()
 
@@ -433,6 +435,7 @@ local http_head_route = {
 }
 
 
+-- admin-api 相关路由
 local uri_route = {
     http_head_route,
     {
@@ -451,6 +454,8 @@ local uri_route = {
         handler = schema_validate,
     },
     {
+        -- https://apisix.apache.org/docs/apisix/terminology/plugin/#hot-reload
+        -- /apisix/admin/plugins/reload 热加载插件
         paths = reload_event,
         methods = {"PUT"},
         handler = post_reload_plugins,
@@ -474,7 +479,7 @@ local standalone_uri_route = {
     },
 }
 
-
+-- apisix/init.init_worker --> .
 function _M.init_worker()
     local local_conf = core.config.local_conf()
     if not local_conf.apisix or not local_conf.apisix.enable_admin then

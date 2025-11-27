@@ -44,7 +44,8 @@ function _M.access(conf, ctx)
     ctx.var.uri = conf.uri or ctx.var.uri
 
     -- perform route matching
-    if router.api.match(ctx) then       -- 用public-api插件暴露其他插件的api方法
+    -- 用public-api插件暴露其他插件的api方法
+    if router.api.match(ctx) then
         return
     end
 

@@ -84,7 +84,11 @@ local has_mod, apisix_ngx_client = pcall(require, "resty.apisix.client")
 
 local _M = {version = 0.4}
 
--- init_by_lua
+-- 参考 ngx_tpl.lua
+-- apisix = require("apisix")
+-- 在 Lua 中，当使用 `require` 导入一个包时，如果导入的包路径是一个目录，Lua 会尝试查找目录下的 `init.lua` 文件并自动加载它。
+-- 这是 Lua 的一种约定，使得在导入一个目录时，可以在该目录下创建 `init.lua` 文件来作为包的入口文件
+-- init_by_lua-->apisix.http_init
 function _M.http_init(args)
     --初始化dns解析
     core.resolver.init_resolver(args)
@@ -130,9 +134,11 @@ function _M.http_init_worker()
     end
     require("apisix.balancer").init_worker()
     load_balancer = require("apisix.balancer")
-    require("apisix.admin.init").init_worker()      --admin-api 初始化，admin-api监听在专门的一个端口
+    --admin-api 初始化，admin-api监听在专门的一个端口
+    require("apisix.admin.init").init_worker()
 
-    require("apisix.timers").init_worker()  --启动background timer。仅特权进程启用
+    --启动background timer。仅特权进程启用
+    require("apisix.timers").init_worker()
 
     require("apisix.debug").init_worker()
 
@@ -249,7 +255,7 @@ local function fetch_ctx()
 end
 
 -- 解析route上的域名
-    -- 遍历nodes, 如果某个node是域名，则将其解析为ip
+-- 遍历nodes, 如果某个node是域名，则将其解析为ip
 local function parse_domain_in_route(route)
     local nodes = route.value.upstream.dns_nodes
     local new_nodes, err = upstream_util.parse_domain_for_nodes(nodes)
@@ -682,6 +688,9 @@ local function set_upstream_x_forwarded_headers(api_ctx)
 end
 
 
+--access_by_lua_block {
+--    apisix.http_access_phase()
+--}
 function _M.http_access_phase()
     -- from HTTP/3 to HTTP/1.1 we need to convert :authority pesudo-header
     -- to Host header, so we set upstream_host variable here.

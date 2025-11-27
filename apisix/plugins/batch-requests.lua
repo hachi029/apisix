@@ -133,6 +133,7 @@ function _M.check_schema(conf, schema_type)
 end
 
 
+-- check schema
 local function check_input(data)
     local ok, err = core.schema.check(req_schema, data)
     if not ok then
@@ -266,6 +267,7 @@ local function batch_requests(ctx)
         max_body_size = default_max_body_size
     end
 
+    -- 获取请求体
     local req_body, err = core.request.get_body(max_body_size, ctx)
     if err then
         -- Nginx doesn't support 417: https://trac.nginx.org/nginx/ticket/2062
@@ -285,6 +287,7 @@ local function batch_requests(ctx)
         }
     end
 
+    -- check_schema
     local code, body = check_input(data)
     if code then
         return code, body
@@ -292,7 +295,8 @@ local function batch_requests(ctx)
 
     local httpc = http.new()
     httpc:set_timeout(data.timeout)
-    local ok, err = httpc:connect("127.0.0.1", ngx.var.server_port) --重新向自己发起请求
+    -- 重新向自己发起请求
+    local ok, err = httpc:connect("127.0.0.1", ngx.var.server_port)
     if not ok then
         return 500, {error_msg = "connect to apisix failed: " .. err}
     end

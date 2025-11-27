@@ -68,7 +68,7 @@ local function attach_http_router_common_methods(http_router)
     end
 end
 
--- init_worker
+-- init.lua -> init_worker
 function _M.http_init_worker()
     local conf = core.config.local_conf()
     local router_http_name = "radixtree_uri"

@@ -33,14 +33,14 @@ local _M = {
     PREFIX = ENV_PREFIX
 }
 
-
+-- 环境变量env组成的table
 local apisix_env_vars = {}
 
 ffi.cdef [[
   extern char **environ;
 ]]
 
-
+-- 解析环境变量为 apisix_env_vars
 function _M.init()
     local e = ffi.C.environ
     if not e then
@@ -61,12 +61,14 @@ function _M.init()
 end
 
 
+-- 解析配置中的环境变量
 local function parse_env_uri(env_uri)
     -- Avoid the error caused by has_prefix to cause a crash.
     if type(env_uri) ~= "string" then
         return nil, "error env_uri type: " .. type(env_uri)
     end
 
+    -- 是否以 '$ENV://' 为前缀
     if not string.has_prefix(upper(env_uri), ENV_PREFIX) then
         return nil, "error env_uri prefix: " .. env_uri
     end
@@ -76,6 +78,7 @@ local function parse_env_uri(env_uri)
     if not idx then
         return {key = path, sub_key = ""}
     end
+    -- 存在subkey, 用于提取json的子字段
     local key = sub(path, 1, idx - 1)
     local sub_key = sub(path, idx + 1)
 
@@ -93,6 +96,7 @@ function _M.fetch_by_uri(env_uri)
         return nil, err
     end
 
+    -- 读取环境变量
     local main_value = apisix_env_vars[opts.key] or os.getenv(opts.key)
     if main_value and opts.sub_key ~= "" then
         local vt, err = json.decode(main_value)
