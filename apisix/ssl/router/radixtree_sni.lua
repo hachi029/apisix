@@ -40,6 +40,7 @@ local _M = {
 }
 
 
+-- 返回创建的路由
 local function create_router(ssl_items)
     local ssl_items = ssl_items or {}
 
@@ -90,6 +91,7 @@ local function create_router(ssl_items)
 end
 
 
+-- 设置私钥
 local function set_pem_ssl_key(sni, cert, pkey)
     local r = get_request()
     if r == nil then
@@ -106,11 +108,13 @@ local function set_pem_ssl_key(sni, cert, pkey)
         return false, "failed to set PEM cert: " .. err
     end
 
+    -- 获取私钥
     local parsed_pkey, err = apisix_ssl.fetch_pkey(sni, pkey)
     if not parsed_pkey then
         return false, "failed to parse PEM priv key: " .. err
     end
 
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#clear_certs
     ok, err = ngx_ssl.set_priv_key(parsed_pkey)
     if not ok then
         return false, "failed to set PEM priv key: " .. err
@@ -145,6 +149,8 @@ function _M.set_cert_and_key(sni, value)
 end
 
 
+-- apisix.ssl_client_hello_phase() -> .
+-- alt_sni 为 sni域名
 function _M.match_and_set(api_ctx, match_only, alt_sni)
     local err
     if not radixtree_router or
@@ -216,6 +222,7 @@ function _M.match_and_set(api_ctx, match_only, alt_sni)
         return true
     end
 
+    -- 重设证书
     ok, err = _M.set(api_ctx.matched_ssl, sni)
     if not ok then
         return false, err
@@ -224,7 +231,7 @@ function _M.match_and_set(api_ctx, match_only, alt_sni)
     return true
 end
 
-
+-- 根据sni匹配结果，重置证书
 function _M.set(matched_ssl, sni)
     if not matched_ssl then
         return false, "failed to match ssl certificate"
@@ -239,6 +246,7 @@ function _M.set(matched_ssl, sni)
             return false, "failed to find SNI: " .. (err or advise)
         end
     end
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#clear_certs
     ngx_ssl.clear_certs()
 
     local new_ssl_value = secret.fetch_secrets(matched_ssl.value, true)
@@ -252,6 +260,7 @@ function _M.set(matched_ssl, sni)
     if matched_ssl.value.client then
         local ca_cert = matched_ssl.value.client.ca
         local depth = matched_ssl.value.client.depth
+        -- 客户端证书校验
         if apisix_ssl.support_client_verification() then
             local parsed_cert, err = apisix_ssl.fetch_cert(sni, ca_cert)
             if not parsed_cert then
@@ -262,6 +271,7 @@ function _M.set(matched_ssl, sni)
                 (ngx.config.subsystem == "stream") or
                 (matched_ssl.value.client.skip_mtls_uri_regex == nil)
             -- TODO: support passing `trusted_certs` (3rd arg, keep it nil for now)
+            -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#verify_client
             local ok, err = ngx_ssl.verify_client(parsed_cert, depth, nil,
                 reject_in_handshake)
             if not ok then
@@ -306,6 +316,7 @@ function _M.init_worker()
         automatic = true,
         item_schema = core.schema.ssl,
         checker = function (item, schema_type)
+            -- schema 校验
             return apisix_ssl.check_ssl_conf(true, item)
         end,
         filter = ssl_filter,

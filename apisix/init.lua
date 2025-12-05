@@ -88,7 +88,7 @@ local _M = {version = 0.4}
 -- apisix = require("apisix")
 -- 在 Lua 中，当使用 `require` 导入一个包时，如果导入的包路径是一个目录，Lua 会尝试查找目录下的 `init.lua` 文件并自动加载它。
 -- 这是 Lua 的一种约定，使得在导入一个目录时，可以在该目录下创建 `init.lua` 文件来作为包的入口文件
--- init_by_lua-->apisix.http_init
+-- init_by_lua_block -->apisix.http_init
 function _M.http_init(args)
     --初始化dns解析
     core.resolver.init_resolver(args)
@@ -96,6 +96,7 @@ function _M.http_init(args)
     core.id.init()
     core.env.init()
 
+    -- 启动特权进程
     local process = require("ngx.process")
     local ok, err = process.enable_privileged_agent()
     if not ok then
@@ -104,6 +105,8 @@ function _M.http_init(args)
 
     -- core.config.config_etcd.init 尝试连接并读取etcd
     if core.config.init then
+        -- 调用 apisix.core.config_${config_provider}.init
+        -- 对于etcd, 读取/apisix目录下所有配置
         local ok, err = core.config.init()
         if not ok then
             core.log.error("failed to load the configuration: ", err)
@@ -113,8 +116,11 @@ function _M.http_init(args)
     xrpc.init()
 end
 
--- init_worker_by_lua
+--init_worker_by_lua_block {
+--    apisix.http_init_worker()
+--}
 function _M.http_init_worker()
+    -- 1. random seed
     local seed, err = core.utils.get_seed_from_urandom()
     if not seed then
         core.log.warn('failed to get seed from urandom: ', err)
@@ -124,24 +130,31 @@ function _M.http_init_worker()
     -- for testing only
     core.log.info("random test in [1, 10000]: ", math.random(1, 10000))
 
+    -- 2. event_module初始化，根据配置，使用的可能是 lua-resty-events 或 lua-resty-worker-events
     require("apisix.events").init_worker()
 
+    -- 3. resty.lrucache 初始化
     core.lrucache.init_worker()
 
+    -- 4. 服务发现 discovery 初始化, 可以配置多种服务发现类型，这里会调用每种服务发现的init_worker()方法
     local discovery = require("apisix.discovery.init").discovery
     if discovery and discovery.init_worker then
         discovery.init_worker()
     end
+    -- 5. balancer.init_worker, 目前只是一个空方法
     require("apisix.balancer").init_worker()
     load_balancer = require("apisix.balancer")
-    --admin-api 初始化，admin-api监听在专门的一个端口
+    -- 6. admin-api 初始化，admin-api监听在专门的一个端口
     require("apisix.admin.init").init_worker()
 
-    --启动background timer。仅特权进程启用
+    -- 7. 启动background timer。仅特权进程启用
     require("apisix.timers").init_worker()
 
+    -- 8. 调试模式：
+    -- https://apisix.apache.org/zh/docs/apisix/next/debug-mode/
     require("apisix.debug").init_worker()
 
+    -- 9. 配置中心的init_worker
     if core.config.init_worker then
         local ok, err = core.config.init_worker()
         if not ok then
@@ -150,11 +163,17 @@ function _M.http_init_worker()
         end
     end
 
+    -- 10. 加载插件
     plugin.init_worker()
+    -- 11. 初始化router
     router.http_init_worker()
+    -- 12. service
     require("apisix.http.service").init_worker()
+    -- 13. plugin_config
     plugin_config.init_worker()
+    -- 14. consumer
     require("apisix.consumer").init_worker()
+    -- 15. consumer_group
     consumer_group.init_worker()
     apisix_secret.init_worker()
 
@@ -178,6 +197,9 @@ function _M.http_init_worker()
 end
 
 
+--exit_worker_by_lua_block {
+--    apisix.http_exit_worker()
+--}
 function _M.http_exit_worker()
     -- TODO: we can support stream plugin later - currently there is not `destroy` method
     -- in stream plugins
@@ -186,6 +208,10 @@ function _M.http_exit_worker()
 end
 
 
+--   ssl_certificate_by_lua_block {
+--       apisix.ssl_phase()
+--   }
+-- 如果ssl会话复用，则不会执行此阶段
 function _M.ssl_phase()
     local ok, err = router.router_ssl.set(ngx.ctx.matched_ssl)
     if not ok then
@@ -197,6 +223,10 @@ function _M.ssl_phase()
 end
 
 
+--- 1.ssl_client_hello->2.ssl_certificate->3.ssl_session_fetch->4.ssl_session_store
+--    ssl_client_hello_by_lua_block {
+--       apisix.ssl_client_hello_phase()
+--   }
 function _M.ssl_client_hello_phase()
     local sni, err = apisix_ssl.server_name(true)
     if not sni or type(sni) ~= "string" then
@@ -212,6 +242,7 @@ function _M.ssl_client_hello_phase()
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
 
+    -- 根据sni匹配并设置证书
     local ok, err = router.router_ssl.match_and_set(api_ctx, true, sni)
 
     ngx_ctx.matched_ssl = api_ctx.matched_ssl
@@ -227,6 +258,7 @@ function _M.ssl_client_hello_phase()
         ngx_exit(-1)
     end
 
+    -- 设置 ssl_clt.set_protocols({"TLSv1.1", "TLSv1.2", "TLSv1.3"})
     ok, err = apisix_ssl.set_protocols_by_clienthello(ngx_ctx.matched_ssl.value.ssl_protocols)
     if not ok then
         core.log.error("failed to set ssl protocols: ", err)
@@ -709,6 +741,7 @@ function _M.http_access_phase()
         return core.response.exit(400)
     end
 
+    -- 根据http请求头来动态设置是否开启debug
     debug.dynamic_debug(api_ctx)
 
     local uri = api_ctx.var.uri
@@ -778,10 +811,12 @@ function _M.http_access_phase()
         end
 
         -- conf: plugin_config_confs
-        route = plugin_config.merge(route, conf) -- 返回的还是入参 route
+        -- 返回的还是入参 route
+        route = plugin_config.merge(route, conf)
     end
 
-    if route.value.service_id then               -- 如果route上关联了service_id；rote上不能内嵌service
+    -- 如果route上关联了service_id；route上不能内嵌service
+    if route.value.service_id then
         local service = service_fetch(route.value.service_id)
         if not service then
             core.log.error("failed to fetch service configuration by ",
@@ -811,7 +846,8 @@ function _M.http_access_phase()
 
     -- run global rule
     local global_rules = apisix_global_rules.global_rules()
-    plugin.run_global_rules(api_ctx, global_rules, nil) -- 会执行插件的rewrite和access方法
+    -- 会执行插件的rewrite和access方法
+    plugin.run_global_rules(api_ctx, global_rules, nil)
 
     --执行route上配置的script https://apisix.apache.org/zh/docs/apisix/terminology/script/
     -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，
@@ -824,12 +860,15 @@ function _M.http_access_phase()
         local plugins = plugin.filter(api_ctx, route)
         api_ctx.plugins = plugins
 
+        -- 只有认证逻辑可以在 rewrite 阶段里面完成，其他需要在代理到上游之前执行的逻辑都是在 access 阶段完成的
         plugin.run_plugin("rewrite", plugins, api_ctx)
-        if api_ctx.consumer then        --如果启用了认证插件
+        -- 如果启用了认证插件
+        if api_ctx.consumer then
             local changed
             local group_conf
 
-            if api_ctx.consumer.group_id then       --consumer所属的group_id, 一个consumer只能属于一个group
+            -- consumer所属的group_id, 一个consumer只能属于一个group
+            if api_ctx.consumer.group_id then
                 group_conf = consumer_group.get(api_ctx.consumer.group_id)
                 if not group_conf then
                     core.log.error("failed to fetch consumer group config by ",
@@ -872,6 +911,9 @@ function _M.dubbo_access_phase()
 end
 
 
+-- access_by_lua_block {
+--    apisix.grpc_access_phase()
+--}
 function _M.grpc_access_phase()
     ngx.ctx = fetch_ctx()
 
@@ -916,6 +958,10 @@ local function set_resp_upstream_status(up_status)
     end
 end
 
+
+--  header_filter_by_lua_block {
+--     apisix.http_header_filter_phase()
+-- }
 --主要是执行插件的header_filter方法
 function _M.http_header_filter_phase()
     core.response.set_header("Server", ver_header)
@@ -942,6 +988,9 @@ function _M.http_header_filter_phase()
     end
 end
 
+--  body_filter_by_lua_block {
+--     apisix.http_body_filter_phase()
+-- }
 -- 依次执行 body_filter和delayed_body_filter阶段
 function _M.http_body_filter_phase()
     common_phase("body_filter")
@@ -1067,6 +1116,9 @@ function _M.status_ready()
 end
 
 
+-- log_by_lua_block {
+--    apisix.http_log_phase()
+--}
 function _M.http_log_phase()
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -1101,7 +1153,9 @@ function _M.http_log_phase()
     core.tablepool.release("api_ctx", api_ctx)
 end
 
--- balance_by_lua
+--        balancer_by_lua_block {
+--            apisix.http_balancer_phase()
+--        }
 -- 在失败重试时，会被多次执行
 -- https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream
 function _M.http_balancer_phase()
@@ -1147,6 +1201,11 @@ end
 do
     local router
 
+--    location /apisix/admin {
+--       content_by_lua_block {
+--           apisix.http_admin()
+--       }
+--   }
 function _M.http_admin()
     if not router then
         router = admin_init.get()
@@ -1168,6 +1227,11 @@ end
 
 end -- do
 
+--   location / {
+--      content_by_lua_block {
+--          apisix.http_control()
+--      }
+--  }
 -- control-api 也是监听在一个单独的端口
 function _M.http_control()
     local ok = control_api_router.match(get_var("uri"))

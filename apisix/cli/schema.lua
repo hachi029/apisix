@@ -430,13 +430,16 @@ local deployment_schema = {
 }
 
 
+-- 校验配置 config.yaml 的schema
 function _M.validate(yaml_conf)
+    -- 生成校验器
     local validator = jsonschema.generate_validator(config_schema)
     local ok, err = validator(yaml_conf)
     if not ok then
         return false, "failed to validate config: " .. err
     end
 
+    -- discovery
     if yaml_conf.discovery then
         for kind, conf in pairs(yaml_conf.discovery) do
             local ok, schema = pcall(require, "apisix.discovery." .. kind .. ".schema")
@@ -450,6 +453,7 @@ function _M.validate(yaml_conf)
         end
     end
 
+    -- deployment.role
     local role = yaml_conf.deployment.role
     local validator = jsonschema.generate_validator(deployment_schema[role])
     local ok, err = validator(yaml_conf.deployment)

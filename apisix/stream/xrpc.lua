@@ -45,6 +45,7 @@ local function register_protocol(name, is_http)
 end
 
 
+-- -- init_by_lua_block -->apisix.http_init --> .
 function _M.init()
     local local_conf = core.config.local_conf()
     if not local_conf.xrpc then

@@ -31,6 +31,7 @@ if config_provider == "json" then
     config = require("apisix.core.config_yaml")
     config.file_type = "json"
 else
+    -- 默认为etcd
     config = require("apisix.core.config_" .. config_provider)
 end
 
@@ -40,7 +41,9 @@ config.type = config_provider
 return {
     version     = require("apisix.core.version"),
     log         = log,
-    config      = config,      -- 本地配置conf/config.yaml并与默认配置apisix/cli/config.lua合并的结果
+    -- config：不同的config_provider有不同的实现。如config_etcd/config_yaml/config_local
+    -- config.local_conf为本地配置conf/config.yaml并与默认配置apisix/cli/config.lua合并的结果
+    config      = config,
     config_util = require("apisix.core.config_util"),
     sleep       = utils.sleep,
     json        = require("apisix.core.json"),

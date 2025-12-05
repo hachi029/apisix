@@ -57,6 +57,7 @@ local function tab_is_array(t)
 end
 
 
+-- 解析环境变量
 local function var_sub(val)
     local err
     local var_used = false
@@ -71,6 +72,7 @@ local function var_sub(val)
             var = var:sub(1, i - 1)
         end
 
+        -- 解析环境变量
         local v = getenv(var) or default
         if v then
             if not exported_vars then
@@ -90,6 +92,7 @@ local function var_sub(val)
 end
 
 
+-- 解析配置文件解析出来的table中的var
 local function resolve_conf_var(conf)
     local new_keys = {}
     for key, val in pairs(conf) do
@@ -97,19 +100,23 @@ local function resolve_conf_var(conf)
         if new_keys[key] then
             goto continue
         end
+        -- 1. 处理key
         -- substitute environment variables from conf keys
         if type(key) == "string" then
             local new_key, _, err = var_sub(key)
             if err then
                 return nil, err
             end
+            -- key包含变量
             if new_key ~= key then
                 new_keys[new_key] = "dummy" -- we only care about checking the key
                 conf.key = nil
+                -- new_key = val
                 conf[new_key] = val
                 key = new_key
             end
         end
+        -- 2. 处理 value
         if type(val) == "table" then
             local ok, err = resolve_conf_var(val)
             if not ok then
@@ -133,6 +140,7 @@ local function resolve_conf_var(conf)
                 end
             end
 
+            -- 设置新的val
             conf[key] = new_val
         end
         ::continue::
@@ -178,6 +186,7 @@ local function path_is_multi_type(path, type_val)
 end
 
 
+-- 合并配置
 local function merge_conf(base, new_tab, ppath)
     ppath = ppath or ""
 
@@ -226,16 +235,19 @@ local function merge_conf(base, new_tab, ppath)
     return base
 end
 
--- 读取conf/conf.yaml 并于默认配置apisix.cli.config合并
+-- 读取conf/conf.yaml 并与默认配置 apisix.cli.config.lua 合并
 function _M.read_yaml_conf(apisix_home)
     if apisix_home then
         profile.apisix_home = apisix_home .. "/"
     end
 
+    -- 如果存在 conf/.customized_config_path， 则读取并返回其内容
     local local_conf_path = profile:customized_yaml_path()
+    -- 否则使用默认的配置 conf/config.yaml
     if not local_conf_path then
         local_conf_path = profile:yaml_path("config")
     end
+    -- 读取文件内容
     local user_conf_yaml, err = util.read_file(local_conf_path)
     if not user_conf_yaml then
         return nil, err
@@ -250,22 +262,26 @@ function _M.read_yaml_conf(apisix_home)
     end
 
     if not is_empty_file then
+        -- lyaml https://github.com/gvvaughan/lyaml
         local user_conf = yaml.load(user_conf_yaml)
         if not user_conf then
             return nil, "invalid config.yaml file"
         end
 
+        -- 解析配置文件中的环境变量
         local ok, err = resolve_conf_var(user_conf)
         if not ok then
             return nil, err
         end
 
+        -- 将默认配置与config.yaml配置合并
         ok, err = merge_conf(default_conf, user_conf)
         if not ok then
             return nil, err
         end
     end
 
+    -- config.yaml schema 校验
     -- fill the default value by the schema
     local ok, err = schema.validate(default_conf)
     if not ok then

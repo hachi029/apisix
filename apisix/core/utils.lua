@@ -69,6 +69,7 @@ local _M = {
 }
 
 
+-- 从/dev/urandom读取8字节
 function _M.get_seed_from_urandom()
     local frandom, err = open("/dev/urandom", "rb")
     if not frandom then

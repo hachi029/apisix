@@ -40,6 +40,7 @@ ffi.cdef [[
   extern char **environ;
 ]]
 
+-- init_by_lua_block -->apisix.http_init-->.
 -- 解析环境变量为 apisix_env_vars
 function _M.init()
     local e = ffi.C.environ
@@ -61,7 +62,8 @@ function _M.init()
 end
 
 
--- 解析配置中的环境变量
+-- 解析配置中的环境变量 $ENV://$env_name/$sub_key
+-- env_name: 环境变量名称，sub_key: 当环境变量的值是 JSON 字符串时，获取某个属性的值
 local function parse_env_uri(env_uri)
     -- Avoid the error caused by has_prefix to cause a crash.
     if type(env_uri) ~= "string" then

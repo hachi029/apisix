@@ -25,6 +25,7 @@ local ngx          = ngx
 local core         = require("apisix.core")
 
 local _M = {
+    -- 启用的events_module名称， lua-resty-events or lua-resty-worker-events
     events_module = nil,
 }
 
@@ -73,6 +74,8 @@ local function init_resty_events()
 end
 
 
+-- apisix.http_init_worker() --> .
+-- 主要根据配置使用的event_module是lua-resty-events 还是 lua-resty-worker-events，进行不同的初始化
 function _M.init_worker()
     if _M.inited then
         -- prevent duplicate initializations in the same worker to
@@ -82,10 +85,13 @@ function _M.init_worker()
 
     _M.inited = true
 
+    -- 读取本地配置
     local conf = core.config.local_conf()
+    -- 配置项 apisix.events.module
     local module_name = core.table.try_read_attr(conf, "apisix", "events", "module")
                             or _M.EVENTS_MODULE_LUA_RESTY_WORKER_EVENTS
 
+    -- lua-resty-events or lua-resty-worker-events
     if module_name == _M.EVENTS_MODULE_LUA_RESTY_EVENTS then
         -- use lua-resty-events as an event module via the apisix.events.module
         -- key in the configuration file

@@ -54,6 +54,7 @@ local str_format = string.format
 local _M = {}
 
 
+-- apisix help
 local function help()
     print([[
 Usage: apisix [action] <argument>
@@ -72,6 +73,7 @@ version:    print the version of apisix
 end
 
 
+-- 比较版本号，参考 init() 方法
 local function version_greater_equal(cur_ver_s, need_ver_s)
     local cur_vers = util.split(cur_ver_s, [[.]])
     local need_vers = util.split(need_ver_s, [[.]])
@@ -93,6 +95,7 @@ local function version_greater_equal(cur_ver_s, need_ver_s)
 end
 
 
+-- 获取openresty的版本
 local function get_openresty_version()
     local str = "nginx version: openresty/"
     local ret = util.execute_cmd("openresty -v 2>&1")
@@ -130,7 +133,9 @@ end
 _M.local_dns_resolver = local_dns_resolver
 
 
+-- apisix version
 local function version()
+    -- 固定的字符串
     print(ver['VERSION'])
 end
 
@@ -153,9 +158,12 @@ local function get_lua_path(conf)
     return ""
 end
 
+-- apisix init
+-- 1.读取config.yaml与默认配置config.lua合并;2.校验schema；3.schema无法检验的自定义校验逻辑;4.渲染生成nginx.conf
 -- 很长的函数，主要功能是读取conf/config.yaml配置，校验schema, 校验相关参数，最后生成conf/nginx.conf
--- 读取结果存放到sys_conf,使用resty.template渲染最终的nginx.conf
+-- 读取结果存放到sys_conf,使用resty.template渲染生成最终的nginx.conf
 local function init(env)
+    -- 1. 是否在root目录执行
     if env.is_root_path then        --不允许在/root目录执行
         print('Warning! Running apisix under /root is only suitable for '
               .. 'development environments and it is dangerous to do so. '
@@ -163,6 +171,7 @@ local function init(env)
               .. 'other than /root.')
     end
 
+    -- 2. 检查ulimit 配置，不小于1024
     local min_ulimit = 1024
     if env.ulimit ~= "unlimited" and env.ulimit <= min_ulimit then
         print(str_format("Warning! Current maximum number of open file "
@@ -171,12 +180,14 @@ local function init(env)
                 .. " is low.", env.ulimit, min_ulimit))
     end
 
+    -- 读取yaml.conf并与默认配置合并
     -- read_yaml_conf
     local yaml_conf, err = file.read_yaml_conf(env.apisix_home)
     if not yaml_conf then
         util.die("failed to read local yaml config of apisix: ", err, "\n")
     end
 
+    -- 再次校验
     local ok, err = schema.validate(yaml_conf)
     if not ok then
         util.die(err, "\n")
@@ -246,6 +257,7 @@ Please modify "admin_key" in conf/config.yaml .
         end
     end
 
+    -- 校验openresty版本，不能低于 1.21.4
     local or_ver = get_openresty_version()
     if or_ver == nil then
         util.die("can not find openresty\n")
@@ -257,6 +269,7 @@ Please modify "admin_key" in conf/config.yaml .
     end
 
     local or_info = env.openresty_info
+    -- 是否开启了 http_stub_status_module 模块
     if not or_info:find("http_stub_status_module", 1, true) then
         util.die("'http_stub_status_module' module is missing in ",
                  "your openresty, please check it out.\n")
@@ -282,25 +295,30 @@ Please modify "admin_key" in conf/config.yaml .
         end
     end
 
+    -- 开启的服务发现方式
     local enabled_discoveries = {}
     for name in pairs(yaml_conf.discovery or {}) do
         enabled_discoveries[name] = true
     end
 
+    -- 开启的插件
     local enabled_plugins = {}
     for i, name in ipairs(yaml_conf.plugins or {}) do
         enabled_plugins[name] = true
     end
 
+    -- 开启的stream插件
     local enabled_stream_plugins = {}
     for i, name in ipairs(yaml_conf.stream_plugins or {}) do
         enabled_stream_plugins[name] = true
     end
 
+    -- 如果启用了proxy-cache插件，但没有配置 apisix.proxy_cache
     if enabled_plugins["proxy-cache"] and not yaml_conf.apisix.proxy_cache then
         util.die("missing apisix.proxy_cache for plugin proxy-cache\n")
     end
 
+    -- 如果开启了batch-requests插件， nginx的real_ip_from配置必须配置 127.0.0.1或localhost
     if enabled_plugins["batch-requests"] then
         local pass_real_client_ip = false
         local real_ip_from = yaml_conf.nginx_config.http.real_ip_from
@@ -374,6 +392,7 @@ Please modify "admin_key" in conf/config.yaml .
         end
     end
 
+    -- prometheus plugin
     if enabled_stream_plugins["prometheus"] and not prometheus_server_addr then
         util.die("L4 prometheus metric should be exposed via export server\n")
     end
@@ -751,10 +770,12 @@ Please modify "admin_key" in conf/config.yaml .
     sys_conf["extra_lua_path"] = get_lua_path(yaml_conf.apisix.extra_lua_path)
     sys_conf["extra_lua_cpath"] = get_lua_path(yaml_conf.apisix.extra_lua_cpath)
 
+    -- 渲染最终的nginx.conf
     -- https://github.com/bungle/lua-resty-template
     local conf_render = template.compile(ngx_tpl)
     local ngxconf = conf_render(sys_conf)
 
+    -- 写入nginx.conf配置
     local ok, err = util.write_file(env.apisix_home .. "/conf/nginx.conf",
                                     ngxconf)
     if not ok then
@@ -762,6 +783,7 @@ Please modify "admin_key" in conf/config.yaml .
     end
 end
 
+-- apisix init_etcd
 -- 初始化etcd, 创建etcd相关目录
 local function init_etcd(env, args)
     etcd.init(env, args)
@@ -792,6 +814,7 @@ local function check_running(env)
     return true, pid
 end
 
+-- apisix start
 -- 创建 相关目录，初始化nginx.conf 执行openresty启动命令
 local function start(env, ...)
     cleanup(env)        -- 删除conf/.customized_config_path
@@ -803,6 +826,7 @@ local function start(env, ...)
         util.die("Error: It is forbidden to run APISIX in the /root directory.\n")
     end
 
+    -- logs日志目录，如果不存在则创建
     local logs_path = env.apisix_home .. "/logs"
     if not pl_path.exists(logs_path) then
         local _, err = pl_path.mkdir(logs_path)
@@ -817,6 +841,7 @@ local function start(env, ...)
     local pid = nil
     for i = 1, 30 do
         local running
+        -- 查看logs/nginx.pid是否存在
         running, pid = check_running(env)
         if not running then
             break
@@ -825,6 +850,7 @@ local function start(env, ...)
         end
     end
 
+    -- nginx.pid仍存在，则强制退出 kill -9
     if pid then
         if pid <= 0 then
             print("invalid pid")
@@ -856,6 +882,7 @@ local function start(env, ...)
     parser:flag("-v --verbose", "show init_etcd debug information")
     local args = parser:parse()
 
+    -- 自定义config.yaml 配置路径
     local customized_yaml = args["config"]
     -- 如果使用了config选项，则将config选项指定的文件路径写到 /conf/.customized_config_path
     if customized_yaml then
@@ -875,6 +902,7 @@ local function start(env, ...)
            util.die("customized config file not exists, path: " .. customized_yaml_path)
         end
 
+        -- 将 -c --config 参数写入 customized_yaml_index
         local ok, err = util.write_file(profile:customized_yaml_index(), customized_yaml_path)
         if not ok then
             util.die("write customized config index failed, err: " .. err)
@@ -883,16 +911,20 @@ local function start(env, ...)
         print("Use customized yaml: ", customized_yaml)
     end
 
-    init(env)   -- 读取conf/config.yaml配置，校验schema, 校验相关参数，最后生成conf/nginx.conf
+    -- 读取conf/config.yaml配置，校验schema, 校验相关参数，最后生成conf/nginx.conf
+    init(env)
 
+    -- 如果不是data_plane，则初始化etcd配置
     if env.deployment_role ~= "data_plane" then
         init_etcd(env, args)
     end
 
-    util.execute_cmd(env.openresty_args)  -- 执行openresty启动命令
+    -- 执行openresty启动命令
+    util.execute_cmd(env.openresty_args)
 end
 
--- 生成nginx.conf, 调用nginx -t
+-- apisix test
+-- 调用init(env)重新生成nginx.conf, 然后调用nginx -t
 local function test(env, backup_ngx_conf)
     -- backup nginx.conf
     local ngx_conf_path = env.apisix_home .. "/conf/nginx.conf"
@@ -901,13 +933,16 @@ local function test(env, backup_ngx_conf)
     if ngx_conf_exist then
         local ok, err = os_rename(ngx_conf_path, ngx_conf_path_bak)
         if not ok then
+            -- 输出错误消息并退出进程
             util.die("failed to backup nginx.conf, error: ", err)
         end
     end
 
     -- reinit nginx.conf
+    -- 根据config.yaml 生成最终的nginx.conf
     init(env)
 
+    -- 执行nginx -t
     local test_cmd = env.openresty_args .. [[ -t -q ]]
     local test_ret = execute((test_cmd))
 
@@ -931,22 +966,29 @@ local function test(env, backup_ngx_conf)
 end
 
 
+-- apisix quit
 local function quit(env)
+    -- 1. remove: conf/.customized_config_path
     cleanup(env)
 
+    -- 2. 执行 /usr/bin/openresty -p /workspace -c /workspace/conf/nginx.conf -s quit
     local cmd = env.openresty_args .. [[ -s quit]]
     util.execute_cmd(cmd)
 end
 
 
+-- apisix stop
 local function stop(env)
+    -- 1. remove: conf/.customized_config_path
     cleanup(env)
 
+    -- 2. 执行 /usr/bin/openresty -p /workspace -c /workspace/conf/nginx.conf -s stop
     local cmd = env.openresty_args .. [[ -s stop]]
     util.execute_cmd(cmd)
 end
 
 
+-- apisix restart
 local function restart(env)
   -- test configuration
   test(env)
@@ -956,14 +998,17 @@ end
 
 -- 重新生成nginx.conf, 执行 -s reload
 local function reload(env)
+    --1. 重新生成nginx.conf
     -- reinit nginx.conf
     init(env)
 
+    -- 2. 执行 nginx -t
     local test_cmd = env.openresty_args .. [[ -t -q ]]
     -- When success,
     -- On linux, os.execute returns 0,
     -- On macos, os.execute returns 3 values: true, exit, 0, and we need the first.
     local test_ret = execute((test_cmd))
+    -- 3. 如果nginx -t 执行成功，执行 nginx -s reload
     if (test_ret == 0 or test_ret == true) then
         local cmd = env.openresty_args .. [[ -s reload]]
         execute(cmd)
@@ -975,6 +1020,8 @@ end
 
 
 
+-- action[cmd_action](env, arg[2])
+-- env 为 env.lua返回值
 local action = {
     help = help,
     version = version,
@@ -989,6 +1036,7 @@ local action = {
 }
 
 
+-- from apisix.lua
 function _M.execute(env, arg)
     local cmd_action = arg[1]
     if not cmd_action then
@@ -1000,6 +1048,7 @@ function _M.execute(env, arg)
         return help()
     end
 
+    -- help/init/reload/start ...
     action[cmd_action](env, arg[2])
 end
 

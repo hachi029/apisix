@@ -48,25 +48,32 @@ local pkey_cache = core.lrucache.new {
 local _M = {}
 
 
+-- clienthello: true or false
+-- 返回SNI
 function _M.server_name(clienthello)
     local sni, err
     if clienthello then
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl/clienthello.md#get_client_hello_server_name
         sni, err = ngx_ssl_client.get_client_hello_server_name()
     else
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#server_name
         sni, err = ngx_ssl.server_name()
     end
     if err then
         return nil, err
     end
 
+    -- 请求中不存在sni, 使用fallback_sni
     if not sni then
         local local_conf = core.config.local_conf()
         sni = core.table.try_read_attr(local_conf, "apisix", "ssl", "fallback_sni")
         if not sni then
+            -- 如果未配置fallback_sni, 则返回nil
             return nil
         end
     end
 
+    -- 转小写
     sni = ngx_sub(sni, "\\.$", "", "jo")
     sni = str_lower(sni)
     return sni
@@ -78,8 +85,11 @@ function _M.session_hostname()
 end
 
 
+-- 设置客户端支持的协议
 function _M.set_protocols_by_clienthello(ssl_protocols)
     if ssl_protocols then
+        --https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl/clienthello.md#set_protocols
+        -- Example: ssl_clt.set_protocols({"TLSv1.1", "TLSv1.2", "TLSv1.3"})
        return ngx_ssl_client.set_protocols(ssl_protocols)
     end
     return true

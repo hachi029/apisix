@@ -17,11 +17,13 @@
 local require       = require
 local core          = require("apisix.core")
 
+-- ip地址匹配器
 local trusted_addresses_matcher
 
 local _M = {}
 
 
+-- 解析配置项 apisix.trusted_addresses
 function _M.init_worker()
     local local_conf = core.config.local_conf()
     local trusted_addresses = core.table.try_read_attr(local_conf, "apisix", "trusted_addresses")
@@ -31,6 +33,7 @@ function _M.init_worker()
         return
     end
 
+    -- 创建ip地址匹配器
     local matcher, err = core.ip.create_ip_matcher(trusted_addresses)
     if not matcher then
         core.log.error("failed to create ip matcher for trusted_addresses: ", err)
@@ -41,6 +44,7 @@ function _M.init_worker()
 end
 
 
+-- 判断address是否为 apisix.trusted_addresses 所信任
 function _M.is_trusted(address)
     if not trusted_addresses_matcher then
         core.log.info("trusted_addresses_matcher is not initialized")

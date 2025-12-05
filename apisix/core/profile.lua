@@ -40,6 +40,8 @@ local _M = {
 -- -- set the working directory of APISIX
 -- profile.apisix_home = env.apisix_home .. "/"
 -- local local_conf_path = profile:yaml_path("config")
+
+--- 获取yaml配置文件位置，考虑profile配置： config.yaml config-dev.yaml
 function _M.yaml_path(self, file_name)
     local file_path = self.apisix_home  .. "conf/" .. file_name
     if self.profile ~= "" and file_name ~= "config-default" then
@@ -50,11 +52,13 @@ function _M.yaml_path(self, file_name)
 end
 
 
+-- 实际是执行apisix 指令时传入的 -c 参数。参考 apisix start
 function _M.customized_yaml_index(self)
     return self.apisix_home .. "/conf/.customized_config_path"
 end
 
 
+-- 如果存在conf/.customized_config_path， 则读取并返回其内容
 function _M.customized_yaml_path(self)
     local customized_config_index = self:customized_yaml_index()
     if util.file_exists(customized_config_index) then

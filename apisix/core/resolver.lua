@@ -44,6 +44,7 @@ end
 
 function _M.init_resolver(args)
     --  initialize /etc/hosts
+    --  解析/etc/hosts
     init_hosts_ip()
 
     local dns_resolver = args and args["dns_resolver"]

@@ -47,6 +47,7 @@ local function filter(route)
 end
 
 
+-- 添加routes() 方法 和 init_worker()方法
 -- attach common methods if the router doesn't provide its custom implementation
 local function attach_http_router_common_methods(http_router)
     -- http_router.routes()返回的是 config_etcd.values
@@ -68,9 +69,10 @@ local function attach_http_router_common_methods(http_router)
     end
 end
 
--- init.lua -> init_worker
+-- apisix.http_init_worker() --> .
 function _M.http_init_worker()
     local conf = core.config.local_conf()
+    -- 默认的路由算法
     local router_http_name = "radixtree_uri"
     local router_ssl_name = "radixtree_sni"
 

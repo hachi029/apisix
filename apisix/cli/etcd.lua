@@ -146,6 +146,7 @@ local function request(url, yaml_conf)
 end
 
 
+-- 通过http接口创建etcd 目录, constants.HTTP_ETCD_DIRECTORY / constants.STREAM_ETCD_DIRECTORY
 local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
     local is_success = true
 
@@ -153,6 +154,7 @@ local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
     local auth_token
     local user = yaml_conf.etcd.user
     local password = yaml_conf.etcd.password
+    -- 执行auth
     if user and password then
         local auth_url = host .. "/v3/auth/authenticate"
         local json_auth = {
@@ -211,6 +213,7 @@ local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
         dirs[name] = true
     end
 
+    -- 创建etcd目录
     for dir_name in pairs(dirs) do
         local key =  (yaml_conf.etcd.prefix or "") .. dir_name .. "/"
 
@@ -285,6 +288,8 @@ local function prepare_dirs(yaml_conf, args, index, host, host_count)
 end
 
 
+-- 执行 apisix init_etcd或 apisix start 时调用
+-- 主要逻辑为从config.yaml中读取etcd连接配置，发起http调用创建etcd配置目录
 function _M.init(env, args)
     -- read_yaml_conf
     local yaml_conf, err = file.read_yaml_conf(env.apisix_home)
@@ -326,7 +331,7 @@ function _M.init(env, args)
     end
 
     -- check the etcd cluster version
-    local etcd_healthy_hosts = {}
+    local etcd_healthy_hosts = {}   -- 存放能够正常连接的etcd host
     for index, host in ipairs(yaml_conf.etcd.host) do
         local version_url = host .. "/version"
         local errmsg
@@ -337,6 +342,7 @@ function _M.init(env, args)
         local etcd = yaml_conf.etcd
         local max_retry = tonumber(etcd.startup_retry) or 2
         while retry_time < max_retry do
+            -- http请求etcd
             res, err = request(version_url, yaml_conf)
             -- In case of failure, request returns nil followed by an error message.
             -- Else the first return value is the response body
@@ -371,10 +377,12 @@ function _M.init(env, args)
         end
     end
 
+    -- 如果所有的etcd服务都连接失败
     if #etcd_healthy_hosts <= 0 then
         util.die("all etcd nodes are unavailable\n")
     end
 
+    -- 如果小于一半的节点正常
     if (#etcd_healthy_hosts / host_count * 100) <= 50 then
         util.die("the etcd cluster needs at least 50% and above healthy nodes\n")
     end
@@ -389,6 +397,7 @@ function _M.init(env, args)
 
     print("trying to initialize the data of etcd")
     local etcd_ok = false
+    -- 初始化etcd 目录
     for index, host in ipairs(etcd_healthy_hosts) do
         if prepare_dirs(yaml_conf, args, index, host, host_count) then
             etcd_ok = true

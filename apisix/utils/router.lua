@@ -14,6 +14,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
+-- https://github.com/api7/lua-resty-radixtree
 local resty_router = require("resty.radixtree")
 
 
@@ -24,7 +25,9 @@ do
         no_param_match = true
     }
 
+-- 创建路由
 function _M.new(routes)
+    -- https://github.com/api7/lua-resty-radixtree
     return resty_router.new(routes, router_opts)
 end
 

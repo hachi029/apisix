@@ -15,6 +15,7 @@
 -- limitations under the License.
 --
 
+
 local pkg_cpath_org = package.cpath
 local pkg_path_org = package.path
 
@@ -29,12 +30,25 @@ local pkg_cpath = apisix_home .. "/deps/lib64/lua/5.1/?.so;"
 local pkg_path_deps = apisix_home .. "/deps/share/lua/5.1/?.lua;"
 local pkg_path_env = apisix_home .. "/?.lua;"
 
+-- 设置cpath和path
 -- modify the load path to load our dependencies
 package.cpath = pkg_cpath .. pkg_cpath_org
 package.path  = pkg_path_deps .. pkg_path_org .. pkg_path_env
 
 -- pass path to construct the final result
 local env = require("apisix.cli.env")(apisix_home, pkg_cpath_org, pkg_path_org)
-local ops = require("apisix.cli.ops")   -- 实现了apisix的相关命令
+-- 实现了apisix的相关命令
+local ops = require("apisix.cli.ops")
 
+-- Usage: apisix [action] <argument>
+--help:       print the apisix cli help message
+--init:       initialize the local nginx.conf
+--init_etcd:  initialize the data of etcd
+--start:      start the apisix server
+--stop:       stop the apisix server
+--quit:       stop the apisix server gracefully
+--restart:    restart the apisix server
+--reload:     reload the apisix server
+--test:       test the generated nginx.conf
+--version:    print the version of apisix
 ops.execute(env, arg)

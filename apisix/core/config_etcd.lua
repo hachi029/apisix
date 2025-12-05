@@ -70,7 +70,7 @@ if not is_http then
     health_check_shm_name = health_check_shm_name .. "-stream"
 end
 local created_obj  = {}     -- key为/routes 或 /upstream 等， value 为 new(key, opts) 返回的对象
-local loaded_configuration = {} -- init_by_lua 阶段拉取的所有etcd的配置
+local loaded_configuration = {} -- init_by_lua 阶段拉取的etcd上的所有配置
 local configuration_loaded_time
 local watch_ctx -- main watch 上下文
 
@@ -328,6 +328,7 @@ local function run_watch(premature)
         return
     end
 
+    -- 始终运行，直到exiting
     local check_worker_th, err = ngx_thread_spawn(function ()
         while not exiting() do
             ngx_sleep(0.1)
@@ -411,7 +412,7 @@ local function getkey(etcd_cli, key)
     return res
 end
 
--- 直接读取etcd dir
+-- 直接读取etcd dir下所有的配置， formatter 用于对响应结果进行解析和格式化
 local function readdir(etcd_cli, key, formatter)
     if not etcd_cli then
         return nil, "not inited"
@@ -428,7 +429,7 @@ local function readdir(etcd_cli, key, formatter)
         return nil, "failed to read etcd dir"
     end
 
-    --如果formatter不为nui, 则执行；否则将res安装v3格式进行格式化
+    --如果formatter不为nil, 则执行；否则将res安装v3格式进行格式化
     res, err = etcd_apisix.get_format(res, key .. '/', true, formatter)
     if not res then
         return nil, err
@@ -539,20 +540,17 @@ local function short_key(self, str)
 end
 
 
--- 对从etcd拉取到的数据执行schema校验，应用到本地
--- 1.对dir_res进行schema校验
--- 2.dir_res中数据保存到self.values和self.values_hash中
--- 3.self.values_hash保存的是id->self.values的array index的映射
--- 4.执行filter(item) 各组件实际是通过filter函数回调来创建真实的route、service、upstream、plugin等待
--- 如路由的filter apisix/router.lua:28 filter
 local function sync_status_to_shdict(status)
+    -- 获取本地配置
     local local_conf = config_local.local_conf()
     if not local_conf.apisix.status then
         return
     end
+    -- 如果不是worker， 直接返回
     if process.type() ~= "worker" then
         return
     end
+    -- status-report
     local status_shdict = ngx.shared[status_report_shared_dict_name]
     if not status_shdict then
         return
@@ -562,6 +560,12 @@ local function sync_status_to_shdict(status)
 end
 
 
+-- 对从etcd拉取到的数据执行schema校验，应用到本地
+-- 1.对dir_res进行schema校验
+-- 2.dir_res中数据保存到self.values和self.values_hash中
+-- 3.self.values_hash保存的是id->self.values的array index的映射
+-- 4.执行filter(item) 各组件实际是通过filter函数回调来创建真实的route、service、upstream、plugin等
+-- 如路由的filter apisix/router.lua:28 filter
 local function load_full_data(self, dir_res, headers)
     local err
     local changed = false
@@ -581,6 +585,7 @@ local function load_full_data(self, dir_res, headers)
             end
         end
 
+        -- checker 为schema校验
         if data_valid and self.checker then
             data_valid, err = self.checker(item.value)
             if not data_valid then
@@ -942,6 +947,7 @@ local function _automatic_fetch(premature, self)
         i = i + 1
 
         local ok, err = xpcall(function()
+            -- 获取etcd客户端
             if not self.etcd_cli then
                 local etcd_cli, err = get_etcd()
                 if not etcd_cli then
@@ -1019,6 +1025,7 @@ local function _automatic_fetch(premature, self)
     end
 
     if not exiting() and self.running then
+        -- 重新开始调用
         ngx_timer_at(0, _automatic_fetch, self)
     end
 end
@@ -1054,9 +1061,10 @@ end
 --    end,
 --})
 
--- 这个方法一般咋洗init_worker_by_lua阶段调用。此时loaded_configuration
+-- 这个方法一般在init_worker_by_lua阶段调用。此时loaded_configuration
 -- 已经被填充
 function _M.new(key, opts)
+    -- 获取本地配置
     local local_conf, err = config_local.local_conf()
     if not local_conf then
         return nil, err
@@ -1084,7 +1092,7 @@ function _M.new(key, opts)
         key = key and prefix .. key,
         automatic = automatic, -- 自动保持配置最新，true 则启动 sub watcher
         item_schema = item_schema,
-        checker = checker,
+        checker = checker,     -- schema校验器
         sync_times = 0,
         running = true,
         conf_version = 0,
@@ -1173,6 +1181,7 @@ local function create_formatter(prefix)
 
         local curr_dir_data
         local curr_key
+        -- 遍历body
         for _, item in ipairs(res.body.kvs) do
             if curr_dir_data then
                 if core_str.has_prefix(item.key, curr_key) then
@@ -1212,8 +1221,8 @@ local function create_formatter(prefix)
     end
 end
 
---init_by_lua -> apisix.http_init-->core.config.init()
-
+--init_by_lua -> apisix.http_init-->core.config_etcd.init() --> .
+-- 在init_by_lua阶段调用；或某个worker意外退出后的init_worker_by_lua阶段调用
 local function init_loaded_configuration()
     loaded_configuration = {}
     local etcd_cli, prefix, err = etcd_apisix.new_without_proxy()
@@ -1230,6 +1239,8 @@ local function init_loaded_configuration()
 end
 
 
+-- init_by_lua_block -->apisix.http_init --> .
+-- 初始化读取/apisix目录下所有的配置
 function _M.init()
     local local_conf, err = config_local.local_conf()
     if not local_conf then
@@ -1240,6 +1251,7 @@ function _M.init()
         return true
     end
 
+    -- 读取/apisix下所有的配置，并读取到 全局配置 loaded_configuration 中
     local err = init_loaded_configuration()
     if err then
         return nil, err
@@ -1251,6 +1263,7 @@ end
 -- 没做啥事
 -- init_worker_by_lua -> apisix.http_init_worker-->core.config.init_worker()
 function _M.init_worker()
+    -- 在共享内存中设置 pid->false
     sync_status_to_shdict(false)
     local local_conf, err = config_local.local_conf()
     if not local_conf then
@@ -1262,7 +1275,9 @@ function _M.init_worker()
     -- if the startup time of a worker differs significantly from that of the master process,
     -- we consider it to have restarted, and at this point,
     -- it is necessary to reload the full configuration from etcd.
+    -- 如果是master刚启动，在init_by_lua阶段已经刚刚调用了init_loaded_configuration 了
     if configuration_loaded_time and ngx_time() - configuration_loaded_time > threshold then
+        -- 此处说明是当前的worker 发生了reload
         log.warn("master process has been running for a long time, ",
                      "reloading the full configuration from etcd for this new worker")
         local err = init_loaded_configuration()

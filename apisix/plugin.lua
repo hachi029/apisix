@@ -114,25 +114,29 @@ local PLUGIN_TYPE_STREAM = 2
 local PLUGIN_TYPE_HTTP_WASM = 3
 -- unload插件，如果插件有destroy方法，执行之，并将其从已加载模块中移除 package.loaded[plugin] = nil
 local function unload_plugin(name, plugin_type)
+    -- 如果是wasm类型插件，直接返回
     if plugin_type == PLUGIN_TYPE_HTTP_WASM then
         return
     end
 
+    -- pkg_name为插件包名
     local pkg_name = "apisix.plugins." .. name
     if plugin_type == PLUGIN_TYPE_STREAM then
         pkg_name = "apisix.stream.plugins." .. name
     end
 
+    -- 卸载old_plugin
     local old_plugin = pkg_loaded[pkg_name]
     if old_plugin and type(old_plugin.destroy) == "function" then
         old_plugin.destroy()
     end
 
+    -- package.loaded
     pkg_loaded[pkg_name] = nil
 end
 
 -- name: 插件名称； plugins_list: 出参 {}；
--- require plugin ; 执行插件的init方法
+-- 1.require plugin ; 2.执行插件的init方法
 local function load_plugin(name, plugins_list, plugin_type)
     local ok, plugin
     --1. require plugin
@@ -240,12 +244,14 @@ local function load(plugin_names, wasm_plugin_names)
     core.table.clear(local_plugins)
     core.table.clear(local_plugins_hash)
 
+    -- 重新加载插件
     for name, value in pairs(processed) do
         local ty = PLUGIN_TYPE_HTTP
         if type(value) == "table" then
             ty = PLUGIN_TYPE_HTTP_WASM
             name = value
         end
+        -- 重新加载插件
         load_plugin(name, local_plugins, ty)
     end
 
@@ -355,6 +361,7 @@ end
 -- init_worker -> plugin.init_worker-> load
 -- 加载插件
 function _M.load(config)
+    -- 从本地config.yaml里取出启用的插件名称
     local ignored, http_plugin_names, stream_plugin_names = get_plugin_names(config)
     if ignored then -- 传入的config中没有插件配置
         return local_plugins
@@ -368,7 +375,7 @@ function _M.load(config)
             if local_conf.wasm then
                 wasm_plugin_names = local_conf.wasm.plugins
             end
--- 加载http插件， 这里是reload, 如果插件已经被加载过，会重新加载
+            -- 加载http和wasm插件， 这里是reload, 如果插件已经被加载过，会重新加载
             local ok, err = load(http_plugin_names, wasm_plugin_names)
             if not ok then
                 core.log.error("failed to load plugins: ", err)
@@ -379,7 +386,7 @@ function _M.load(config)
     if not stream_plugin_names then
         core.log.warn("failed to read stream plugin list from local file")
     else
--- 加载stream http插件
+        -- 加载stream http插件
         local ok, err = load_stream(stream_plugin_names)
         if not ok then
             core.log.error("failed to load stream plugins: ", err)
@@ -825,6 +832,7 @@ local init_plugins_syncer
 do
     local plugins_conf
 
+    -- apisix.http_init_worker() --> plugin.init_worker() --> .
     --  core.config.new("/plugins", opts) 启动任务watch etcd配置更新
     function init_plugins_syncer()
         local err
@@ -835,6 +843,7 @@ do
             filter = function(item)
                 -- we need to pass 'item' instead of plugins_conf because
                 -- the latter one is nil at the first run
+                -- 加载插件
                 _M.load(item)
             end,
         })
@@ -861,10 +870,11 @@ function _M.init_prometheus()
 end
 
 
+-- apisix.http_init_worker() --> .
 function _M.init_worker()
     -- someone's plugin needs to be initialized after prometheus
     -- see https://github.com/apache/apisix/issues/3286
-    -- 根据conf.yaml里配置，加载插件，执行插件的init方法
+    -- 根据conf.yaml里配置，1.加载插件(require plugin)，2.执行插件的init方法
     _M.load()
 
     if local_conf and not local_conf.apisix.enable_admin then
@@ -1218,14 +1228,16 @@ end
 -- plugins 待执行的插件，已经排好序了
 -- return api_ctx, plugin_run , 第二个参数标识是否有插件被执行了
 function _M.run_plugin(phase, plugins, api_ctx)
-    local plugin_run = false    -- 标识是否有插件被执行了
+    -- 标识是否有插件被执行了
+    local plugin_run = false
     api_ctx = api_ctx or ngx.ctx.api_ctx
     if not api_ctx then
         return
     end
 
     plugins = plugins or api_ctx.plugins
-    if not plugins or #plugins == 0 then  --没有插件
+    --没有插件
+    if not plugins or #plugins == 0 then
         return api_ctx
     end
 
@@ -1235,7 +1247,8 @@ function _M.run_plugin(phase, plugins, api_ctx)
         and phase ~= "body_filter"
         and phase ~= "delayed_body_filter"
     then
-        for i = 1, #plugins, 2 do  --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
+        --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
+        for i = 1, #plugins, 2 do
 
             if phase == "rewrite_in_consumer" and plugins[i + 1]._skip_rewrite_in_consumer then
                 goto CONTINUE
@@ -1257,7 +1270,8 @@ function _M.run_plugin(phase, plugins, api_ctx)
                 api_ctx._plugin_name = plugins[i]["name"]
                 local code, body = phase_func(conf, api_ctx) -- 执行插件方法
                 api_ctx._plugin_name = nil
-                if code or body then    --在请求转发到upstream之前的阶段，可以直接向客户端返回响应
+                --在请求转发到upstream之前的阶段，可以直接向客户端返回响应
+                if code or body then
                     if is_http then
                         if code >= 400 then
                             core.log.warn(plugins[i].name, " exits with http status code ", code)
@@ -1350,7 +1364,8 @@ function _M.run_global_rules(api_ctx, global_rules, phase_name)
 
             core.table.clear(plugins)
             -- 对需要执行的插件进行排序，过滤不需要执行的插件
-            plugins = _M.filter(api_ctx, global_rule, plugins, route) -- 返回的也是入参plugins
+            -- 返回的也是入参plugins
+            plugins = _M.filter(api_ctx, global_rule, plugins, route)
             if phase_name == nil then
                 _M.run_plugin("rewrite", plugins, api_ctx)
                 _M.run_plugin("access", plugins, api_ctx)
