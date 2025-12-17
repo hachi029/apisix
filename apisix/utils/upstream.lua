@@ -87,7 +87,7 @@ local function parse_domain_for_nodes(nodes)
         local host = node.host
         if not ipmatcher.parse_ipv4(host) and
                 not ipmatcher.parse_ipv6(host) then
-            -- 如果是域名
+            -- 如果是域名, 将host解析为域名
             local ip, err = core.resolver.parse_domain(host)
             -- 只用了解析结果的ip
             if ip then

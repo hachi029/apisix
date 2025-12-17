@@ -56,6 +56,7 @@ local patch_tcp_socket
 do
     local old_tcp_sock_connect
 
+    --是对ngx.socket.tcp.connect 的封装，增加了域名解析这一步
     local function new_tcp_sock_connect(sock, host, port, opts)
         local core_str = require("apisix.core.string")
         local resolver = require("apisix.core.resolver")
@@ -69,6 +70,7 @@ do
 
             elseif not ipmatcher.parse_ipv4(host) and not ipmatcher.parse_ipv6(host) then
                 local err
+                -- 解析域名
                 host, err = resolver.parse_domain(host)
                 if not host then
                     return nil, "failed to parse domain: " .. err
@@ -85,6 +87,7 @@ do
             old_tcp_sock_connect = sock.connect
         end
 
+        -- patch ngx.socket.tcp.connect
         sock.connect = new_tcp_sock_connect
         return sock
     end
@@ -137,6 +140,7 @@ local patch_udp_socket
 do
     local old_udp_sock_setpeername
 
+    --是对ngx.socket.udp.setpeername 的封装，增加了域名解析这一步
     local function new_udp_sock_setpeername(sock, host, port)
         local core_str = require("apisix.core.string")
         local resolver = require("apisix.core.resolver")
@@ -356,6 +360,7 @@ local mt = {
 }
 
 local function luasocket_tcp()
+    -- 对lua原生socket封装
     local sock = socket.tcp()
     local tcp4 = socket.tcp4()
     local tcp6 = socket.tcp6()

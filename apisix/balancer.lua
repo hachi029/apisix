@@ -15,6 +15,7 @@
 -- limitations under the License.
 --
 local require           = require
+-- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/balancer.md
 local balancer          = require("ngx.balancer")
 local core              = require("apisix.core")
 local priority_balancer = require("apisix.balancer.priority")
@@ -29,7 +30,8 @@ local set_timeouts     = balancer.set_timeouts
 local ngx_now          = ngx.now
 
 local module_name = "balancer"
-local pickers = {} -- 存储各种类型的负载均衡器, 如chash、roundrobin pickers[type] = require "apisix.balancer.type"
+-- 存储各种类型的负载均衡器, 如chash、roundrobin。 pickers[type] = require "apisix.balancer.type"
+local pickers = {}
 
 --function (key, version, create_obj_fun, ...)
 -- 负载均衡器的缓存，key是up_conf.parent.value.id
@@ -63,8 +65,8 @@ local function transform_node(new_nodes, node)
     return new_nodes
 end
 
--- 将健康节点按node优先级分组。通过checker:get_target_status(node.host, port or node.port, host) 获取节点状态
--- return new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
+-- 对 upstream.nodes 中的 健康节点 按 node优先级 分组。通过checker:get_target_status(node.host, port or node.port, host) 获取节点状态
+-- 返回的table格式为： new_nodes[node.priority][node.host .. ":" .. node.port] = node.weight
 local function fetch_health_nodes(upstream, checker)
     local nodes = upstream.nodes
     if not checker then     --如果没有健康检查器，则认为每个node都是健康状态
@@ -79,6 +81,7 @@ local function fetch_health_nodes(upstream, checker)
     local port = upstream.checks and upstream.checks.active and upstream.checks.active.port
     local up_nodes = core.table.new(0, #nodes)
     for _, node in ipairs(nodes) do
+        -- 获取节点健康状态
         local ok, err = healthcheck_manager.fetch_node_status(checker,
                                              node.host, port or node.port, host)
         if ok then
@@ -101,8 +104,10 @@ local function fetch_health_nodes(upstream, checker)
     return up_nodes
 end
 
+-- lrucache_server_picker(key, version, create_server_picker, up_conf, checker)
 --主要是使用健康的节点创建负载均衡器，如果设置了node.priority创建priority类型的balancer
 local function create_server_picker(upstream, checker)
+    -- 如chash、roundrobin
     local picker = pickers[upstream.type]
     if not picker then
         pickers[upstream.type] = require("apisix.balancer." .. upstream.type)
@@ -154,13 +159,17 @@ local function set_balancer_opts(route, ctx)
     -- If the matched route has timeout config, prefer to use the route config.
     local timeout = nil
     if route and route.value and route.value.timeout then
+        -- 使用route上配置的timeout
         timeout = route.value.timeout
     else
+        -- 使用upstream_conf上配置的超时时间
         if up_conf.timeout then
             timeout = up_conf.timeout
         end
     end
     if timeout then
+        -- 设置与upstream的超时时间
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/balancer.md#set_timeouts
         local ok, err = set_timeouts(timeout.connect, timeout.send,
                                      timeout.read)
         if not ok then
@@ -168,15 +177,20 @@ local function set_balancer_opts(route, ctx)
         end
     end
 
+    -- 重试次数
     local retries = up_conf.retries
     if not retries or retries < 0 then
+        -- 默认为nodes数量-1
         retries = #up_conf.nodes - 1
     end
 
     if retries > 0 then
         if up_conf.retry_timeout and up_conf.retry_timeout > 0 then
+            -- 设置重试超时时间
             ctx.proxy_retry_deadline = ngx_now() + up_conf.retry_timeout
         end
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/balancer.md#set_more_tries
+        -- Sets the tries performed when the current attempt (which may be a retry) fails
         local ok, err = set_more_tries(retries)
         if not ok then
             core.log.error("could not set upstream retries: ", err)
@@ -223,17 +237,21 @@ local function pick_server(route, ctx)
             ctx.server_picker.after_balance(ctx, true)
         end
 
+        -- 健康检查器,实现被动健康检查
         if checker then
             local state, code = get_last_failure()
             local host = up_conf.checks and up_conf.checks.active and up_conf.checks.active.host
             local port = up_conf.checks and up_conf.checks.active and up_conf.checks.active.port
             if state == "failed" then
                 if code == 504 then
+                    -- 报告超时
                     checker:report_timeout(ctx.balancer_ip, port or ctx.balancer_port, host)
                 else
+                    -- 报告tco错误
                     checker:report_tcp_failure(ctx.balancer_ip, port or ctx.balancer_port, host)
                 end
             else
+                -- http status
                 checker:report_http_status(ctx.balancer_ip, port or ctx.balancer_port, host, code)
             end
         end
@@ -342,9 +360,9 @@ do
     end
 end
 
--- init.lua http_balancer_phase -> this.run
+-- apisix.http_balancer_phase() -> .
 -- route: matched route
--- plugin_funcs: 为init.lua中的common_phase， 用来执行global_rules和plugins的before_proxy方法
+-- plugin_funcs: 为init.lua中的 common_phase， 用来执行global_rules和plugins的before_proxy方法
 -- 这个方法如果存在失败重试，会被多次执行
 function _M.run(route, ctx, plugin_funcs)
     local server, err
@@ -358,14 +376,16 @@ function _M.run(route, ctx, plugin_funcs)
         set_balancer_opts(route, ctx)
 
     else    --重试
-        if ctx.proxy_retry_deadline and ctx.proxy_retry_deadline < ngx_now() then -- proxy_retry_deadline超时
+        -- 检查 proxy_retry_deadline 超时
+        if ctx.proxy_retry_deadline and ctx.proxy_retry_deadline < ngx_now() then
             -- retry count is (try count - 1)
             core.log.error("proxy retry timeout, retry count: ", (ctx.balancer_try_count or 1) - 1,
                            ", deadline: ", ctx.proxy_retry_deadline, " now: ", ngx_now())
             return core.response.exit(502)
         end
         -- retry
-        server, err = pick_server(route, ctx)   --从load_balancer中重新找一个server
+        -- 从load_balancer中重新选择一个server
+        server, err = pick_server(route, ctx)
         if not server then
             core.log.error("failed to pick server: ", err)
             return core.response.exit(502)
@@ -373,6 +393,7 @@ function _M.run(route, ctx, plugin_funcs)
 
         local header_changed
         local pass_host = ctx.pass_host
+        -- 向upstream传递Host的方式
         if pass_host == "node" then
             local host = server.upstream_host
             if host ~= ctx.var.upstream_host then
@@ -382,6 +403,7 @@ function _M.run(route, ctx, plugin_funcs)
             end
         end
 
+        -- common_phase("before_proxy")
         local _, run = plugin_funcs("before_proxy")
         -- always recreate request as the request may be changed by plugins
         if run or header_changed then
@@ -391,7 +413,7 @@ function _M.run(route, ctx, plugin_funcs)
 
     core.log.info("proxy request to ", server.host, ":", server.port)
 
-    --设置upstream的 keepalive_pool ngx.balancer.set_current_peer
+    --设置upstream的 keepalive_pool 调用ngx.balancer.set_current_peer
     local ok, err = set_current_peer(server, ctx)
     if not ok then
         core.log.error("failed to set server peer [", server.host, ":",

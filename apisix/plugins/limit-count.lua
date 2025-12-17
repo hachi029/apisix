@@ -18,6 +18,8 @@ local fetch_secrets = require("apisix.secret").fetch_secrets
 local limit_count = require("apisix.plugins.limit-count.init")
 local workflow = require("apisix.plugins.workflow")
 
+-- 使用固定窗口算法，通过给定时间间隔内的请求数量来限制请求速率。超过配置配额的请求将被拒绝
+-- https://apisix.apache.org/zh/docs/apisix/plugins/limit-count
 local plugin_name = "limit-count"
 local _M = {
     version = 0.5,
@@ -34,6 +36,7 @@ end
 
 
 function _M.access(conf, ctx)
+    -- 将conf中value以$开头的，解析为对应变量值
     conf = fetch_secrets(conf, true)
     return limit_count.rate_limit(conf, ctx, plugin_name, 1)
 end

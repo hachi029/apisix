@@ -40,6 +40,7 @@ local _M = {}
 -- Timeout for all I/O operations
 http.TIMEOUT = 3
 
+-- 解析版本号 major.minor.patch --> {major, minor, patch}
 local function parse_semantic_version(ver)
     local errmsg = "invalid semantic version: " .. ver
 
@@ -73,7 +74,9 @@ local function parse_semantic_version(ver)
 end
 
 
+-- 比较版本号
 local function compare_semantic_version(v1, v2)
+    -- major.minor.patch --> {major, minor, patch}
     local ver1, err = parse_semantic_version(v1)
     if not ver1 then
         return nil, err
@@ -96,6 +99,7 @@ local function compare_semantic_version(v1, v2)
 end
 
 
+-- 发起http请求
 local function request(url, yaml_conf)
     local response_body = {}
     local single_request = false
@@ -110,6 +114,7 @@ local function request(url, yaml_conf)
 
     local res, code
 
+    -- 如果是https协议
     if str_sub(url.url, 1, 8) == "https://" then
         local verify = "peer"
         if yaml_conf.etcd.tls then
@@ -146,6 +151,8 @@ local function request(url, yaml_conf)
 end
 
 
+
+-- apisix init -> _M.init --> prepare_dirs --> .
 -- 通过http接口创建etcd 目录, constants.HTTP_ETCD_DIRECTORY / constants.STREAM_ETCD_DIRECTORY
 local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
     local is_success = true
@@ -168,6 +175,7 @@ local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
         local res, err
         local retry_time = 0
         while retry_time < 2 do
+            -- 发送auth认证请求
             res, err = request({
                 url = auth_url,
                 method = "POST",
@@ -263,8 +271,10 @@ local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
             util.die(errmsg)
         end
 
+        -- 如果有错误
         if res_put:find("error", 1, true) then
             is_success = false
+            -- 如果所有的host均失败，则退出
             if (index == host_count) then
                 errmsg = str_format("got malformed key-put message: \"%s\" from etcd \"%s\"\n",
                                     res_put, put_url)
@@ -283,6 +293,7 @@ local function prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
 end
 
 
+-- _M.init --> 初始化etcd 相关目录
 local function prepare_dirs(yaml_conf, args, index, host, host_count)
     return prepare_dirs_via_http(yaml_conf, args, index, host, host_count)
 end
@@ -332,6 +343,7 @@ function _M.init(env, args)
 
     -- check the etcd cluster version
     local etcd_healthy_hosts = {}   -- 存放能够正常连接的etcd host
+    -- 以下循环，遍历配置的每个etcd host, 请求其/version 路径，获取etcd版本。能够正常响应的host， 加入到etcd_healthy_hosts中
     for index, host in ipairs(yaml_conf.etcd.host) do
         local version_url = host .. "/version"
         local errmsg
@@ -343,6 +355,7 @@ function _M.init(env, args)
         local max_retry = tonumber(etcd.startup_retry) or 2
         while retry_time < max_retry do
             -- http请求etcd
+            -- curl 127.0.0.1:2379/version
             res, err = request(version_url, yaml_conf)
             -- In case of failure, request returns nil followed by an error message.
             -- Else the first return value is the response body
@@ -356,6 +369,7 @@ function _M.init(env, args)
         end
 
         if res then
+            -- {"etcdserver":"3.5.2","etcdcluster":"3.5.0"}
             local body, _, err = dkjson.decode(res)
             if err or (body and not body["etcdcluster"]) then
                 errmsg = str_format("got malformed version message: \"%s\" from etcd \"%s\"\n", res,
@@ -399,6 +413,7 @@ function _M.init(env, args)
     local etcd_ok = false
     -- 初始化etcd 目录
     for index, host in ipairs(etcd_healthy_hosts) do
+        -- 只要任一host成功，即返回
         if prepare_dirs(yaml_conf, args, index, host, host_count) then
             etcd_ok = true
             break

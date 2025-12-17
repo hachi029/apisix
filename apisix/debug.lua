@@ -291,6 +291,7 @@ end --do
 --basic:
 --  enable: true
 --#END
+-- 每秒执行一次，查看conf/debug.yaml文件是否有变更
 local function sync_debug_status(premature)
     if premature then
         return
@@ -345,15 +346,17 @@ function _M.enable_debug()
 end
 
 
--- apisix.http_init_worker()
+-- apisix.http_init_worker() --> .
 function _M.init_worker()
     local process = require("ngx.process")
+    -- 如果不是worker, 直接返回
     if process.type() ~= "worker" then
         return
     end
 
     -- https://apisix.apache.org/zh/docs/apisix/next/debug-mode/
     sync_debug_status()
+    -- 每秒执行一次，查看conf/debug.yaml文件是否有变更， 如有变更则根据文件内容更新配置
     ngx.timer.every(1, sync_debug_status)
 end
 

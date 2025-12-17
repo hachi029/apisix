@@ -24,6 +24,7 @@ local core = require("apisix.core")
 local config_local   = require("apisix.core.config_local")
 local resource = require("apisix.resource")
 local upstream_utils = require("apisix.utils.upstream")
+-- https://github.com/Kong/lua-resty-healthcheck
 local healthcheck
 local events = require("apisix.events")
 local tab_clone = core.table.clone
@@ -32,8 +33,10 @@ local jp = require("jsonpath")
 local config_util = require("apisix.core.config_util")
 
 local _M = {}
-local working_pool = {}     -- resource_path -> {version = ver, checker = checker}
-local waiting_pool = {}      -- resource_path -> resource_ver
+-- table, resource_path -> {version = ver, checker = checker}
+local working_pool = {}
+-- table, resource_path -> resource_ver
+local waiting_pool = {}
 
 local DELAYED_CLEAR_TIMEOUT = 10
 local healthcheck_shdict_name = "upstream-healthcheck"
@@ -43,16 +46,19 @@ if not is_http then
 end
 
 
+-- 获取健康检查器名称
 local function get_healthchecker_name(value)
     return "upstream#" .. (value.resource_key or value.upstream.resource_key)
 end
 _M.get_healthchecker_name = get_healthchecker_name
 
 
+-- 根据up_conf创建健康检查器
 local function create_checker(up_conf)
     if not up_conf.checks then
         return nil
     end
+    -- 读取本地配置
     local local_conf = config_local.local_conf()
     if local_conf and local_conf.apisix and local_conf.apisix.disable_upstream_healthcheck then
         core.log.info("healthchecker won't be created: disabled upstream healthcheck")
@@ -60,11 +66,15 @@ local function create_checker(up_conf)
     end
     core.log.info("creating healthchecker for upstream: ", up_conf.resource_key)
     if not healthcheck then
+        -- https://github.com/Kong/lua-resty-healthcheck
         healthcheck = require("resty.healthcheck")
     end
 
+    -- https://kong.github.io/lua-resty-healthcheck/#new
     local checker, err = healthcheck.new({
+        -- name of the health checker
         name = get_healthchecker_name(up_conf),
+        -- the name of the lua_shared_dict specified in the Nginx configuration to use
         shm_name = healthcheck_shdict_name,
         checks = up_conf.checks,
         events_module = events:get_healthcheck_events_module(),
@@ -83,6 +93,7 @@ local function create_checker(up_conf)
 
     for _, node in ipairs(up_conf.nodes) do
         local host_hdr = up_hdr or (use_node_hdr and node.domain)
+        -- https://kong.github.io/lua-resty-healthcheck/#checker:add_target
         local ok, err = checker:add_target(node.host, port or node.port, host,
                                         true, host_hdr)
         if not ok then
@@ -95,16 +106,20 @@ local function create_checker(up_conf)
 end
 
 
+-- set_by_route->.
+-- 获取健康检查器，如果不存在，则创建
 function _M.fetch_checker(resource_path, resource_ver)
     local working_item = working_pool[resource_path]
     if working_item and working_item.version == resource_ver then
         return working_item.checker
     end
 
+    -- 正在创建
     if waiting_pool[resource_path] == resource_ver then
         return nil
     end
 
+    -- 添加新的创建任务
     -- Add to waiting pool with version
     core.log.info("adding ", resource_path, " to waiting pool with version: ", resource_ver)
     waiting_pool[resource_path] = resource_ver
@@ -112,6 +127,7 @@ function _M.fetch_checker(resource_path, resource_ver)
 end
 
 
+-- 获取节点健康状态
 function _M.fetch_node_status(checker, ip, port, hostname)
     -- check if the checker is valid
     if not checker or checker.dead then
@@ -129,6 +145,8 @@ local function add_working_pool(resource_path, resource_ver, checker)
     }
 end
 
+-- 根据resource_path和resource_ver 从working_pool中查找 checker。
+-- 只有resource_path和resource_ver 完全一致，才返回checker
 local function find_in_working_pool(resource_path, resource_ver)
     local checker = working_pool[resource_path]
     if not checker then
@@ -153,20 +171,26 @@ local function get_plugin_name(path)
         or json_path:match("^plugins%.([^%.]+)")
 end
 
+-- 定时任务，每秒执行一次。核心逻辑就是遍历waiting_pool，根据waiting_pool创建健康检查器checker
+-- init_worker -> .
 local function timer_create_checker()
     if core.table.nkeys(waiting_pool) == 0 then
         return
     end
 
+    -- waiting_pool会在 fetch_checker 中添加项目
     local waiting_snapshot = tab_clone(waiting_pool)
+    -- 遍历 waiting_snapshot
     for resource_path, resource_ver in pairs(waiting_snapshot) do
         do
+            -- 查看working_pool中是否已存在相同的resource_path和resource_ver的checker了
             if find_in_working_pool(resource_path, resource_ver) then
                 core.log.info("resource: ", resource_path,
                              " already in working pool with version: ",
                                resource_ver)
                 goto continue
             end
+            -- 获取最新配置
             local res_conf = resource.fetch_latest_conf(resource_path)
             if not res_conf then
                 goto continue
@@ -196,19 +220,23 @@ local function timer_create_checker()
 
             -- if a checker exists then delete it before creating a new one
             local existing_checker = working_pool[resource_path]
+            -- 将已存在的checker停止掉
             if existing_checker then
+                -- https://kong.github.io/lua-resty-healthcheck/#checker:delayed_clear
                 existing_checker.checker:delayed_clear(DELAYED_CLEAR_TIMEOUT)
                 existing_checker.checker:stop()
                 core.log.info("releasing existing checker: ", tostring(existing_checker.checker),
                               " for resource: ", resource_path, " and version: ",
                               existing_checker.version)
             end
+            -- 根据up_conf创建健康检查器
             local checker = create_checker(upstream)
             if not checker then
                 goto continue
             end
             core.log.info("create new checker: ", tostring(checker), " for resource: ",
                         resource_path, " and version: ", resource_ver)
+            -- 将checker加入到working_pool
             add_working_pool(resource_path, resource_ver, checker)
         end
 
@@ -218,12 +246,16 @@ local function timer_create_checker()
 end
 
 
+-- 定时任务，每秒执行一次。逻辑是遍历所有的checker, 检查其配置是否变更，如果有变更，则将其销毁
+-- init_worker -> .
 local function timer_working_pool_check()
     if core.table.nkeys(working_pool) == 0 then
         return
     end
 
+    -- working_pool在 timer_create_checker 中添加项目
     local working_snapshot = tab_clone(working_pool)
+    -- 遍历 working_snapshot
     for resource_path, item in pairs(working_snapshot) do
         --- remove from working pool if resource doesn't exist
         local res_conf = resource.fetch_latest_conf(resource_path)
@@ -248,6 +280,7 @@ local function timer_working_pool_check()
                                                     upstream._nodes_ver)
             core.log.info("checking working pool for resource: ", resource_path,
                         " current version: ", current_ver, " item version: ", item.version)
+            -- 如果配置未发送变化，则不需要destroy
             if item.version == current_ver then
                 need_destroy = false
             end
@@ -264,9 +297,12 @@ local function timer_working_pool_check()
     end
 end
 
+-- 主要是启动两个定时任务 timer_create_checker 和 timer_working_pool_check
+-- apisix.http_init_worker() -> upstream.init_worker() -> .
 function _M.init_worker()
     local timer_create_checker_running = false
     local timer_working_pool_check_running = false
+    -- 启动定时任务，每秒执行一次 timer_create_checker
     timer_every(1, function ()
         if not exiting() then
             if timer_create_checker_running then
@@ -281,6 +317,7 @@ function _M.init_worker()
             timer_create_checker_running = false
         end
     end)
+    -- 启动定时任务，每秒执行一次 timer_working_pool_check
     timer_every(1, function ()
         if not exiting() then
             if timer_working_pool_check_running then

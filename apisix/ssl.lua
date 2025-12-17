@@ -36,10 +36,12 @@ unsigned long ERR_peek_error(void);
 void ERR_clear_error(void);
 ]]
 
+-- PEM格式到opaque cdata pointer格式的证书缓存
 local cert_cache = core.lrucache.new {
     ttl = 3600, count = 1024,
 }
 
+-- PEM格式到opaque cdata pointer格式的证书私钥缓存
 local pkey_cache = core.lrucache.new {
     ttl = 3600, count = 1024,
 }
@@ -136,6 +138,7 @@ local function encrypt(aes_128_cbc_with_iv, origin)
     return ngx_encode_base64(encrypted)
 end
 
+-- 对私钥进行ase decrypt
 function _M.aes_encrypt_pkey(origin, field)
     local local_conf = core.config.local_conf()
     local aes_128_cbc_with_iv_tbl_gde = get_aes_128_cbc_with_iv_gde(local_conf)
@@ -156,6 +159,7 @@ function _M.aes_encrypt_pkey(origin, field)
 end
 
 
+-- 对私钥进行ase decrypt
 local function aes_decrypt_pkey(origin, field)
     if not field and core.string.has_prefix(origin, "---") then
         return origin
@@ -220,6 +224,8 @@ end
 _M.validate = validate
 
 
+-- Converts the PEM-formated SSL certificate chain data into an opaque cdata pointer
+-- (for later uses in the set_cert function, for example).
 local function parse_pem_cert(sni, cert)
     core.log.debug("parsing cert for sni: ", sni)
 
@@ -228,7 +234,9 @@ local function parse_pem_cert(sni, cert)
 end
 
 
+-- 将PEM格式的证书转换为an opaque cdata pointer (for later uses in the set_cert function）
 function _M.fetch_cert(sni, cert)
+    -- 先从缓存中取，否则调用parse_pem_cert构建缓存
     local parsed_cert, err = cert_cache(cert, nil, parse_pem_cert, sni, cert)
     if not parsed_cert then
         return false, err
@@ -238,19 +246,24 @@ function _M.fetch_cert(sni, cert)
 end
 
 
+-- Converts the PEM-formatted SSL private key data into an opaque cdata pointer
+-- (for later uses in the set_priv_key function, for example).
 local function parse_pem_priv_key(sni, pkey)
     core.log.debug("parsing priv key for sni: ", sni)
 
+    -- 先aes decrypt
     local key, err = aes_decrypt_pkey(pkey)
     if not key then
         core.log.error(err)
         return nil, err
     end
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#parse_pem_priv_key
     local parsed, err = ngx_ssl.parse_pem_priv_key(key)
     return parsed, err
 end
 
 
+--将PEM格式的私钥证书转换为an opaque cdata pointer (for later uses in the set_priv_key function）
 function _M.fetch_pkey(sni, pkey)
     local parsed_pkey, err = pkey_cache(pkey, nil, parse_pem_priv_key, sni, pkey)
     if not parsed_pkey then
@@ -262,6 +275,7 @@ end
 
 
 local function support_client_verification()
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#verify_client
     return ngx_ssl.verify_client ~= nil
 end
 _M.support_client_verification = support_client_verification
@@ -320,6 +334,12 @@ function _M.check_ssl_conf(in_dp, conf)
 end
 
 
+--- The Certificate Status Request extension, also known as OCSP Stapling,
+--- allows the client to request that the server provide a time-stamped OCSP response during the TLS handshake.
+--- This eliminates the need for the client to contact the OCSP responder directly, improving privacy and performance.
+--- The server "staples" the OCSP response to the certificate chain, reducing latency and preventing OCSP responder overload.
+--- OCSP Stapling is particularly important for mobile and high-traffic websites. Defined in RFC 6066.
+--- 返回是否需要 OCSP Stapling
 function _M.get_status_request_ext()
     core.log.debug("parsing status request extension ... ")
     local ext = ngx_ssl_client.get_client_hello_ext(5)

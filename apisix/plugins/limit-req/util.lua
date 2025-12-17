@@ -25,6 +25,7 @@ local tonumber          = tonumber
 local _M = {version = 0.1}
 
 
+-- 需要4次redis操作，性能较差
 -- the "commit" argument controls whether should we record the event in shm.
 function _M.incoming(self, red, key, commit)
     local rate = self.rate

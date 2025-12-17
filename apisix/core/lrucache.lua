@@ -56,27 +56,35 @@ local PLUGIN_ITEMS_COUNT = 8
 local global_lru_fun
 
 
-    -- lru_obj: resty.lrucache(item_count)
-    -- invalid_stale: 过期对象是否无效，如果否，过期的对象会被重新设置ttl并返回
-    -- item_ttl: 对象的ttl
-    -- item_release: item从缓存中释放的回调 （几乎没有场景传这个参数）
-    -- key: lru key,
-    -- version: obj附加字段version. 如果指定了version, 只有version一致，才会返回key对应的对象
-
+-- lru_obj: 缓存对象，为resty.lrucache(item_count)
+-- invalid_stale: 过期对象是否无效，如果否，过期的对象会被重新设置ttl并返回
+-- refresh_stale: 如果true, 当缓存过期时，会提交一个刷新缓存的异步任务
+-- item_ttl: 对象的ttl
+-- item_release: item从缓存中释放的回调 （几乎没有场景传这个参数）
+-- key: lru key,
+-- version: obj附加字段version. 如果指定了version, 只有version一致，才会返回key对应的对象
+-- create_obj_fun： 创建对象方法
 local function fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
                                  key, version, create_obj_fun, ...)
+
+    -- https://github.com/openresty/lua-resty-lrucache/tree/master?tab=readme-ov-file#get
+    -- the stale data is also returned as the second return value if available
     local obj, stale_obj = lru_obj:get(key)
+    -- 对象未过期且版本也相同
     if obj and obj.ver == version then
         return obj
     end
 
+    -- 对象已过期，版本有效
     if stale_obj and stale_obj.ver == version then
         if not invalid_stale then
             lru_obj:set(key, stale_obj, item_ttl)
             return stale_obj
         end
 
+        -- 如果要刷新已过期对象，则提交一个刷新任务
         if refresh_stale then
+            -- 提交异步任务，在 refresh_stale_objs()被中执行
             stale_obj_pool[lru_obj][key] = {
                 fn = create_obj_fun,
                 args = {...},
@@ -103,24 +111,30 @@ local function new_lru_fun(opts)
         item_count = opts.count or PLUGIN_ITEMS_COUNT   -- 8
         item_ttl = opts.ttl or PLUGIN_TTL   -- 5min
     else
+        -- opts为nil则表示全局lru_cache
         item_count = opts and opts.count or GLOBAL_ITEMS_COUNT  --1024
         item_ttl = opts and opts.ttl or GLOBAL_TTL  --60 min
     end
 
     local invalid_stale = opts and opts.invalid_stale
+    -- 如果为true,且缓存对象已过期， 则提交一个异步刷新任务
     local refresh_stale = opts and opts.refresh_stale
     local serial_creating = opts and opts.serial_creating
+    -- 创建lua_cache对象 require("resty.lrucache").new
     local lru_obj = lru_new(item_count)
 
+    -- 在neg_lru_obj中的key, 始终返回nil。neg_lru_obj缓存的是无效的key和version
     local neg_lru_obj
     if opts and opts.neg_ttl and opts.neg_count then
         neg_lru_obj = lru_new(opts.neg_count)
     end
 
+    -- stale_obj_pool 存放着需要被异步刷新缓存的任务，参考 refresh_stale_objs() 方法
     stale_obj_pool[lru_obj] = {}
     -- key: 缓存key; version: 缓存版本; create_obj_fun: 如果缓存不存在，创建方法; ... create_obj_fun参数
     return function (key, version, create_obj_fun, ...)      --缓存获取元素的方法
         -- check negative cache first
+        -- 在neg_lru_obj中的key, 始终返回nil
         if neg_lru_obj then
             local neg_obj = neg_lru_obj:get(key)
             if neg_obj and neg_obj.ver == version then
@@ -128,7 +142,9 @@ local function new_lru_fun(opts)
             end
         end
 
+        -- 如果 允许并发创建对象(not serial_creating) 或 当前上下文不允许阻塞(即无法使用锁)
         if not serial_creating or not can_yield_phases[get_phase()] then
+            -- 获取缓存对象
             local cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale,
                                 item_ttl, key, version, create_obj_fun, ...)
             if cache_obj then
@@ -137,6 +153,7 @@ local function new_lru_fun(opts)
 
             local obj, err = create_obj_fun(...)    --缓存里没找到，创建对象
             if obj ~= nil then
+                -- 重新设置到lur_obj中
                 lru_obj:set(key, {val = obj, ver = version}, item_ttl)
             elseif neg_lru_obj then
                 -- cache the failure in negative cache
@@ -146,10 +163,10 @@ local function new_lru_fun(opts)
             return obj, err
         end
 
-        -- 执行过程允许阻塞且不允许并发创建对象
-
+        -- 此处说明执行过程允许阻塞(可以使用锁)且不允许并发创建对象
         local cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
                             key, version, create_obj_fun, ...)
+        -- 如果获取到了对象，直接返回
         if cache_obj then
             return cache_obj.val
         end
@@ -162,11 +179,13 @@ local function new_lru_fun(opts)
         local key_s = tostring(key)
         log.info("try to lock with key ", key_s)
 
+        -- 锁定
         local elapsed, err = lock:lock(key_s)
         if not elapsed then
             return nil, "failed to acquire the lock: " .. err
         end
 
+        -- 再次检查
         cache_obj = fetch_valid_cache(lru_obj, invalid_stale, refresh_stale, item_ttl,
                         key, version, create_obj_fun, ...)
         --说明有其他协程已经创建了obj
@@ -176,6 +195,7 @@ local function new_lru_fun(opts)
             return cache_obj.val
         end
 
+        -- 加载
         local obj, err = create_obj_fun(...)
         if obj ~= nil then
             lru_obj:set(key, {val = obj, ver = version}, item_ttl)
@@ -183,6 +203,7 @@ local function new_lru_fun(opts)
             -- cache the failure in negative cache
             neg_lru_obj:set(key, {err = err, ver = version}, opts.neg_ttl)
         end
+        -- 释放锁
         lock:unlock()
         log.info("unlock with key ", key_s)
 
@@ -191,6 +212,7 @@ local function new_lru_fun(opts)
 end
 
 
+-- 创建全局lru_cache
 global_lru_fun = new_lru_fun()
 
 
@@ -233,8 +255,12 @@ local function plugin_ctx_id(api_ctx, extra_key)
 end
 
 
+-- apisix.http_init_worker() -> init_worker -> .
+-- 每秒执行一次。执行 存放在 stale_obj_pool 中需要被异步加载缓存的任务
 local function refresh_stale_objs()
+    -- 遍历每个lrucache
     for lru_obj, keys in pairs(stale_obj_pool) do
+        -- 执行lrucache中的每个需要刷新缓存的key。 参考fetch_valid_cache()方法
         for key, new_obj in pairs(keys) do
             local obj, err = new_obj.fn(unpack(new_obj.args))
             if obj ~= nil then
@@ -250,8 +276,10 @@ local function refresh_stale_objs()
 end
 
 
+-- apisix.http_init_worker() -> .
 local function init_worker()
     local running = false
+    -- 每秒执行一次.refresh_stale_objs 中执行 存放在stale_obj_pool中需要被异步加载缓存的任务
     timer_every(1, function ()
         if not exiting() then
             if running then
@@ -272,6 +300,7 @@ end
 local _M = {
     version = 0.1,
     init_worker = init_worker,
+    -- return function (key, version, create_obj_fun, ...)
     new = new_lru_fun,
     global = global_lru_fun,
     plugin_ctx = plugin_ctx,

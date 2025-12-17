@@ -174,6 +174,7 @@ function _M.check_schema(conf, schema_type)
 end
 
 
+-- 根据配置创建限流器limiter
 local function create_limit_obj(conf, plugin_name)
     core.log.info("create new " .. plugin_name .. " plugin instance")
 
@@ -220,6 +221,7 @@ end
 
 
 local function gen_limit_obj(conf, ctx, plugin_name)
+    -- 插件的 group ID，以便同一 group 的路由可以共享相同的速率限制计数器。
     if conf.group then
         return lrucache(conf.group, "", create_limit_obj, conf, plugin_name)
     end
@@ -234,10 +236,12 @@ local function gen_limit_obj(conf, ctx, plugin_name)
     return core.lrucache.plugin_ctx(lrucache, ctx, extra_key, create_limit_obj, conf, plugin_name)
 end
 
+-- cost 为本次消费的个数, 一般为1
 function _M.rate_limit(conf, ctx, name, cost, dry_run)
     core.log.info("ver: ", ctx.conf_version)
     core.log.info("conf: ", core.json.delay_encode(conf, true))
 
+    -- 获取limiter
     local lim, err = gen_limit_obj(conf, ctx, name)
 
     if not lim then
@@ -250,6 +254,8 @@ function _M.rate_limit(conf, ctx, name, cost, dry_run)
 
     local conf_key = conf.key
     local key
+    -- key 的类型。key_type 为 var，则 key 将被解释为变量。如果 key_type 为 var_combination，则 key 将被解释为变量的组合。
+    -- 如果 key_type 为 constant，则 key 将被解释为常量。
     if conf.key_type == "var_combination" then
         local err, n_resolved
         key, err, n_resolved = core.utils.resolve_var(conf_key, ctx.var)
@@ -272,6 +278,7 @@ function _M.rate_limit(conf, ctx, name, cost, dry_run)
         key = ctx.var["remote_addr"]
     end
 
+    -- 构建真实的key
     key = gen_limit_key(conf, ctx, key)
     core.log.info("limit key: ", key)
 

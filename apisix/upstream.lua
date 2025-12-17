@@ -28,6 +28,7 @@ local pcall = pcall
 local str_byte = string.byte
 local ngx_var = ngx.var
 local is_http = ngx.config.subsystem == "http"
+-- core.config.new("/upstreams", opts)
 local upstreams
 local healthcheck_manager
 
@@ -174,6 +175,7 @@ function _M.set_by_route(route, api_ctx)
 
     -- service_name 与nodes 二选一，用于服务发现
     if up_conf.service_name then
+        -- 服务发现
         if not discovery then
             return 503, "discovery is uninitialized"
         end
@@ -256,6 +258,7 @@ function _M.set_by_route(route, api_ctx)
         local node_ver = resource.get_nodes_ver(up_conf.resource_key)
         local resource_version = upstream_util.version(up_conf.resource_version,
                                                                       node_ver)
+        -- 获取健康检查器，如果不存在，则创建
         local checker = healthcheck_manager.fetch_checker(up_conf.resource_key, resource_version)
         api_ctx.up_checker = checker
         return
@@ -272,6 +275,7 @@ function _M.set_by_route(route, api_ctx)
     local node_ver = resource.get_nodes_ver(up_conf.resource_key)
     local resource_version = upstream_util.version(up_conf.resource_version,
                                                                   node_ver )
+    -- 获取健康检查器，如果不存在，则创建
     local checker = healthcheck_manager.fetch_checker(up_conf.resource_key, resource_version)
     api_ctx.up_checker = checker
     -- ssl相关
@@ -372,6 +376,7 @@ local function get_chash_key_schema(hash_on)
 end
 
 
+-- core.config.new("/upstreams", opts) 中的checker
 local function check_upstream_conf(in_dp, conf)
     if not in_dp then
         local ok, err = check_schema(conf)
@@ -475,10 +480,14 @@ function _M.encrypt_conf(conf)
 end
 
 
+-- core.config.new("/upstreams", opts) 中的filter
+-- 逻辑主要为更新value.nodes格式(hash格式改为array格式)。设置parent.has_domain、value.dns_nodes等字段
 local function filter_upstream(value, parent)
     if not value then
         return
     end
+    -- 其resource_key和resource_version来自于parent
+    -- 如果parent不为nil, 表示upstream是内嵌在其他实体上的，如route中内嵌的upstream
     value.resource_key = parent and parent.key
     value.resource_version = ((parent and parent.modifiedIndex) or value.modifiedIndex)
     value.resource_id = ((parent and parent.value.id) or value.id)
@@ -487,6 +496,9 @@ local function filter_upstream(value, parent)
         value.scheme = "tcp"
     end
 
+    -- https://apisix.apache.org/zh/docs/apisix/admin-api/#upstream
+    -- nodes与service_name二选一。nodes可以是hash表或数组。如果是hash表，key为ip:port, value为权重;
+    -- 如果是数组，每个元素为{host, port, weight}
     if not value.nodes then
         return
     end
@@ -499,18 +511,23 @@ local function filter_upstream(value, parent)
             local host = node.host
             if not core.utils.parse_ipv4(host) and
                     not core.utils.parse_ipv6(host) then
+                -- 标识是一个域名
                 parent.has_domain = true
                 break
             end
         end
     else
+        -- 将hash格式改为array格式new_nodes
         local new_nodes = core.table.new(core.table.nkeys(nodes), 0)
+        -- 当为hash时，key为host:port, value为权重;
         for addr, weight in pairs(nodes) do
             local host, port = core.utils.parse_addr(addr)
             if not core.utils.parse_ipv4(host) and
                     not core.utils.parse_ipv6(host) then
+                -- 说明host是域名
                 parent.has_domain = true
             end
+            -- 构建一个node
             local node = {
                 host = host,
                 port = port,
@@ -518,6 +535,7 @@ local function filter_upstream(value, parent)
             }
             core.table.insert(new_nodes, node)
         end
+        -- 更新value.nodes为array格式
         value.nodes = new_nodes
     end
     if parent.has_domain then
@@ -527,8 +545,10 @@ end
 _M.filter_upstream = filter_upstream
 
 
+-- apisix.http_init_worker() -> .
 function _M.init_worker()
     local err
+    -- 启动 /upstreams 监听
     upstreams, err = core.config.new("/upstreams", {
             automatic = true,
             item_schema = core.schema.upstream,
@@ -549,6 +569,7 @@ function _M.init_worker()
         return
     end
     healthcheck_manager = require("apisix.healthcheck_manager")
+    -- 健康检查管理器初始化
     healthcheck_manager.init_worker()
 end
 

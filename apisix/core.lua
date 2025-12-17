@@ -61,6 +61,7 @@ return {
     utils       = utils,
     dns_client  = require("apisix.core.dns.client"),
     etcd        = require("apisix.core.etcd"),
+    -- https://github.com/openresty/lua-tablepool
     tablepool   = require("tablepool"),
     resolver    = require("apisix.core.resolver"),
     os          = require("apisix.core.os"),

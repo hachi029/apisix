@@ -42,12 +42,14 @@ local function init_hosts_ip()
 end
 
 
+-- apisix.http_init -> .
 function _M.init_resolver(args)
     --  initialize /etc/hosts
     --  解析/etc/hosts
     init_hosts_ip()
 
     local dns_resolver = args and args["dns_resolver"]
+    -- 设置dns服务器
     utils.set_resolver(dns_resolver)
     log.info("dns resolver ", json.delay_encode(dns_resolver, true))
 end

@@ -121,7 +121,15 @@ end
 -- 将watch到的数据存入watch_ctx.res，通知sub watch处理数据
 -- append res to the queue and notify pending watchers
 local function produce_res(res, err)
+    -- log.warn("produce_res:", json.encode({res=res, err=err}))
+
+    -- {"res":{"result":{"events":[{"kv":{"value":{"update_time":1764225974,"plugins":{"public-api":{}},
+    -- "id":"1","create_time":1764157231,"uri":"/apisix/batch-requests"},"version":"11","key":"/apisix/routes/1",
+    -- "create_revision":"68","mod_revision":"322"}}],"header":{"member_id":"10276657743932975437","raft_term":"8","cluster_id":"14841639068965178418","revision":"322"}}}}
+
+    -- {"res":{"result":{"events":[{"type":"DELETE","kv":{"mod_revision":"324","key":"/apisix/routes/7"}}],"header":{"member_id":"10276657743932975437","raft_term":"8","cluster_id":"14841639068965178418","revision":"324"}}}}
     insert_tab(watch_ctx.res, {res=res, err=err})
+    -- 通知所有的sub_watch。watch_ctx.sema[key] = sub_watch.sema
     for _, sema in pairs(watch_ctx.sema) do
         sema:post()
     end
@@ -160,11 +168,17 @@ local function do_run_watch(premature)
 
         if rev == 0 then
             while true do
+                -- 这里会返回所有数据
+                -- --{body_reader:func, reason, read_trailers, status, read_body:func, headers, has_body}
                 local res, err = watch_ctx.cli:get(watch_ctx.prefix)
                 if not res then
                     log.error("etcd get: ", err)
                     ngx_sleep(3)
                 else
+                    -- https://www.cnblogs.com/FengZeng666/p/16156407.html
+                    -- Revision;CreateRevision: key被创建时的Revision; Version: 作用域为 key, 这个key每次修改都会自增
+                    -- revision 每次变更此值+1。 作用域为集群，逻辑时间戳，全局单调递增，任何 key 的增删改都会使其自增
+                    -- res.body: {"header":{"raft_term":"12","cluster_id":"14841639068965178418","revision":"380","member_id":"10276657743932975437"}}
                     rev = tonumber(res.body.header.revision)
                     break
                 end
@@ -203,6 +217,8 @@ local function do_run_watch(premature)
 
     log.info("restart watchdir: start_revision=", opts.start_revision)
 
+    -- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md#watchdir
+    -- watchdir 返回的是一个func
     local res_func, err, http_cli = watch_ctx.cli:watchdir(watch_ctx.prefix, opts)
     if not res_func then
         log.error("watchdir err: ", err)
@@ -212,6 +228,7 @@ local function do_run_watch(premature)
 
     ::watch_event::
     while true do
+        -- 第一次返回 res.result.created； 之后调用此方法，只有超时(opts.timeout: 50s)或有数据变更时才返回
         local res, err = res_func()
         -- 1.错误处理
         if not res then
@@ -262,14 +279,18 @@ local function do_run_watch(premature)
             cancel_watch(http_cli)
             break
         end
-
-        -- 2.cleanup, 此处也可以保证未被 watch的 res被清理掉，避免未消费的res持续占用内存
-        -- 找到watch_ctx.idx中最小项 min_idx = min(watch_ctx.idx)
+        -- {"result":{"created":true,"header":{"revision":"380","member_id":"10276657743932975437","raft_term":"12","cluster_id":"14841639068965178418"}}}
+        -- 第一次遍历时，返回的是created
         if res.result.created then
             goto watch_event
         end
+        -- https://www.cnblogs.com/FengZeng666/p/16156407.html
+        -- Revision;CreateRevision: key被创建时的Revision; Version: 作用域为 key, 这个key每次修改都会自增
+        -- 此后如有key变更，返回格式为: {"result":{"header":{"cluster_id":"14841639068965178418","raft_term":"12","member_id":"10276657743932975437","revision":"385"},
+        -- "events":[{"kv":{"value":{"plugins":{"public-api":{}},"id":"1","uri":"/apisix/batch-requests","update_time":1764225975,"create_time":1764157231},"version":"16","key":"/apisix/routes/1","create_revision":"68","mod_revision":"385"}}]}}
 
-        -- cleanup
+        -- 2.cleanup, 此处也可以保证未被 watch的 res被清理掉，避免未消费的res持续占用内存
+        -- 找到watch_ctx.idx中最小项 min_idx = min(watch_ctx.idx)
         local min_idx = 0
         for _, idx in pairs(watch_ctx.idx) do
             if (min_idx == 0) or (idx < min_idx) then
@@ -313,6 +334,7 @@ local function do_run_watch(premature)
         if rev > watch_ctx.rev then
             watch_ctx.rev = rev + 1
         end
+        -- 处理监听到的更新
         produce_res(res)
     end
 end
@@ -322,6 +344,8 @@ end
 -- run_watch始终是在timer中被调用
 -- run_watch会被不停调用 if not exiting() then  ngx_timer_at(0, run_watch)
 local function run_watch(premature)
+    -- https://groups.google.com/g/openresty-en/c/5Y3k-hKObko ngx.timer 与 ngx.thread.spawn 异同
+    -- ngx.timer 会脱离创建timer的上下文，ngx.thread.spawn不会
     local run_watch_th, err = ngx_thread_spawn(do_run_watch, premature)
     if not run_watch_th then
         log.error("failed to spawn thread do_run_watch: ", err)
@@ -346,10 +370,12 @@ local function run_watch(premature)
                         " restart those threads, error: ", inspect(err))
     end
 
+    -- 要么当前正在退出，要么
     ngx_thread_kill(run_watch_th)
     ngx_thread_kill(check_worker_th)
 
     if not exiting() then
+        -- 重新调度
         ngx_timer_at(0, run_watch)
     else
         -- notify child watchers
@@ -359,6 +385,7 @@ end
 
 -- 初始化watch_ctx，只在首次new方法被调用时执行
 local function init_watch_ctx(key)
+    -- watch_ctx 为全局唯一的结构体
     if not watch_ctx then
         watch_ctx = {
             idx = {},   -- 记录了key 到res index的映射， 如 "/routes" -> 1, "/upstram" -> 2； v为已经消费过的最大res_idx+1
@@ -418,7 +445,8 @@ local function readdir(etcd_cli, key, formatter)
         return nil, "not inited"
     end
 
-    --包含key下所有数据
+    -- 包含dir下所有数据
+    -- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md#readdir
     local res, err = etcd_cli:readdir(key)
     if not res then
         -- log.error("failed to get key from etcd: ", err)
@@ -463,7 +491,7 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
             local res2
             for _, evt in ipairs(res.result.events) do
                 -- is evt.kv.key start_with key
-                -- sub watch 找到自己感兴趣的updates
+                -- sub watch 找到自己感兴趣的updates  key为 "/apisix/routes/1"
                 if core_str.find(evt.kv.key, key) == 1 then
                     if not res2 then
                         res2 = tablex.deepcopy(res)
@@ -473,6 +501,7 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
                 end
             end
 
+            -- 如果有更新数据，则返回
             if res2 then
                 return res2
             end
@@ -489,6 +518,9 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
     end
 
     watch_ctx.sema[key] = self.watch_sema
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/semaphore.md#wait
+    -- return true when there is resources available for it  or nil when timeout
+    -- 参考 produce_res() 方法
     local ok, err = self.watch_sema:wait(timeout or 60)
     watch_ctx.sema[key] = nil
     if ok then
@@ -514,6 +546,7 @@ local function is_bulk_operation(dir_res)
     return false
 end
 
+-- sub watch
 local function waitdir(self)
     local etcd_cli = self.etcd_cli
     local key = self.key
@@ -524,6 +557,7 @@ local function waitdir(self)
         return nil, "not inited"
     end
 
+    -- sub watch
     local res, err = http_waitdir(self, etcd_cli, key, modified_index, timeout)
 
     if not res then
@@ -535,6 +569,7 @@ local function waitdir(self)
 end
 
 
+-- str: /apisix/routes/getting-started-ip, return :getting-started-ip
 local function short_key(self, str)
     return sub_str(str, #self.key + 2)
 end
@@ -572,6 +607,7 @@ local function load_full_data(self, dir_res, headers)
 
     if self.single_item then
         self.values = new_tab(1, 0)
+        -- values_hash， 对于/apisix/routes/getting-started-ip, key 为 getting-started-ip
         self.values_hash = new_tab(0, 1)
 
         local item = dir_res
@@ -601,6 +637,7 @@ local function load_full_data(self, dir_res, headers)
 
             item.clean_handlers = {}
 
+            -- 回调
             if self.filter then
                 self.filter(item)
             end
@@ -619,7 +656,9 @@ local function load_full_data(self, dir_res, headers)
         self.values = new_tab(#values, 0)
         self.values_hash = new_tab(0, #values)
 
+        -- 遍历，针对每一项
         for _, item in ipairs(values) do
+            -- item.key: /apisix/routes/getting-started-ip, key:getting-started-ip
             local key = short_key(self, item.key)
             local data_valid = true
             if type(item.value) ~= "table" then
@@ -637,6 +676,7 @@ local function load_full_data(self, dir_res, headers)
                 end
             end
 
+            -- self.checker : 自定义checker
             if data_valid and self.checker then
                 -- TODO: An opts table should be used
                 -- as different checkers may use different parameters
@@ -649,7 +689,9 @@ local function load_full_data(self, dir_res, headers)
 
             if data_valid then
                 changed = true
+                -- 加入到self.values数组中
                 insert_tab(self.values, item)
+                -- 构建hash
                 self.values_hash[key] = #self.values
 
                 item.value.id = key
@@ -670,6 +712,7 @@ local function load_full_data(self, dir_res, headers)
     end
 
     if changed then
+        -- conf_version 初始为0， 每变化一次，conf_version+1
         self.conf_version = self.conf_version + 1
     end
 
@@ -678,6 +721,7 @@ local function load_full_data(self, dir_res, headers)
 end
 
 
+-- 更新 self.prev_index = new_ver
 function _M.upgrade_version(self, new_ver)
     new_ver = tonumber(new_ver)
     if not new_ver then
@@ -706,6 +750,7 @@ local function sync_data(self)
 
     -- 直接读取etcd
     if self.need_reload then
+        -- self.key = prefix .. key
         local res, err = readdir(self.etcd_cli, self.key)
         if not res then
             return false, err
@@ -760,12 +805,14 @@ local function sync_data(self)
     --针对此次变更中所有key apply到self.values和self.values_hash中
     --变更类型可能是Add/Update/Delete
     --如果是delete or update,会执行事件回调fire_all_clean_handlers
+    -- 遍历每个实体
     for _, res in ipairs(res_copy) do
         local key
         local data_valid = true
         if self.single_item then
             key = self.key
         else
+            -- key为id
             key = short_key(self, res.key)
         end
 
@@ -777,6 +824,7 @@ local function sync_data(self)
         end
 
         if data_valid and res.value and self.item_schema then
+            -- 校验schema
             data_valid, err = check_schema(self.item_schema, res.value)
             if not data_valid then
                 log.error("failed to check item data of [", self.key,
@@ -784,6 +832,7 @@ local function sync_data(self)
             end
         end
 
+        -- 自定义校验
         if data_valid and res.value and self.checker then
             data_valid, err = self.checker(res.value, res.key)
             if not data_valid then
@@ -810,8 +859,9 @@ local function sync_data(self)
             return false
         end
 
+        -- key为配置实体的id
         local pre_index = self.values_hash[key]
-        --Delete Or Update
+        -- Delete Or Update    pre_index不为nil表示是删除或更新
         if pre_index then
             local pre_val = self.values[pre_index]
             if pre_val then
@@ -829,6 +879,7 @@ local function sync_data(self)
 
             --删除
             else
+                --  sync_times， 每100次会进行self.values 的compact
                 self.sync_times = self.sync_times + 1
                 self.values[pre_index] = false
                 self.values_hash[key] = nil
@@ -850,9 +901,12 @@ local function sync_data(self)
         --对self.values进行compact，避免过于稀疏。self.values是数组，随着数据变更，
         --可能中间部分元素被删除形成空洞，此处进行compact
         if self.sync_times > 100 then
+            --1.复制一份
             local values_original = table.clone(self.values)
+            --2.clean
             table.clear(self.values)
 
+            --3.重新插入
             for i = 1, #values_original do
                 local val = values_original[i]
                 if val then
@@ -860,6 +914,7 @@ local function sync_data(self)
                 end
             end
 
+            -- 重建 self.values_hash
             table.clear(self.values_hash)
             log.info("clear stale data in `values_hash` for key: ", key)
 
@@ -868,15 +923,18 @@ local function sync_data(self)
                 self.values_hash[key] = i
             end
 
+            -- 重置self.sync_times
             self.sync_times = 0
         end
 
         -- /plugins' filter need to known self.values when it is called
         -- so the filter should be called after self.values set.
+        -- 回调自定义filter
         if self.filter then
             self.filter(res)
         end
 
+        -- conf_version 初始为0， 每变化一次，conf_version+1
         self.conf_version = self.conf_version + 1
 
         ::CONTINUE::
@@ -913,7 +971,7 @@ function _M.getkey(self, key)
     return getkey(self.etcd_cli, key)
 end
 
--- new(key, opts) --> if automatic then _automatic_fetch
+-- new(key, opts) --> if automatic then  ngx_timer_at(0, _automatic_fetch, obj)
 -- 都是在timer上下文被调用
 -- 逻辑就是不停的watch self.key 目录，有数据更新就应用到self.values和self.values_hash
 local function _automatic_fetch(premature, self)
@@ -922,6 +980,7 @@ local function _automatic_fetch(premature, self)
     end
 
     -- https://github.com/api7/lua-resty-etcd/blob/master/health_check.md
+    -- Implement a passive health check mechanism, that when the connection/read/write fails, record it as an endpoint's failure.
     -- 虽然创建了health_check貌似并没有使用
     if not (health_check.conf and health_check.conf.shm_name) then
         -- used for worker processes to synchronize configuration
@@ -929,6 +988,7 @@ local function _automatic_fetch(premature, self)
         -- the endpoint is marked as unhealthy, the unhealthy endpoint will not be choosed
         -- to connect for a fail_timeout time in the future
         -- retry automatically retry another endpoint when operations failed.
+        --- Initializes the health check object
         local _, err = health_check.init({
             shm_name = health_check_shm_name,
             fail_timeout = self.health_check_timeout,
@@ -1061,16 +1121,20 @@ end
 --    end,
 --})
 
--- 这个方法一般在init_worker_by_lua阶段调用。此时loaded_configuration
--- 已经被填充
+-- 这个方法一般在init_worker_by_lua阶段调用。此时loaded_configuration 已经被填充
+--if self.filter then
+--    self.filter(item)
+--end
+-- 返回对象的values字段保存着配置值
 function _M.new(key, opts)
-    -- 获取本地配置
+    -- 获取本地配置(config.yaml)
     local local_conf, err = config_local.local_conf()
     if not local_conf then
         return nil, err
     end
 
     local etcd_conf = local_conf.etcd
+    -- etcd key前缀
     local prefix = etcd_conf.prefix
     local resync_delay = etcd_conf.resync_delay
     if not resync_delay or resync_delay < 0 then
@@ -1089,6 +1153,7 @@ function _M.new(key, opts)
 
     local obj = setmetatable({
         etcd_cli = nil,
+        -- /routers ...
         key = key and prefix .. key,
         automatic = automatic, -- 自动保持配置最新，true 则启动 sub watcher
         item_schema = item_schema,
@@ -1122,9 +1187,10 @@ function _M.new(key, opts)
             log.notice("use loaded configuration ", key)
 
             local dir_res, headers = res.body, res.headers
+            -- 配置解析，调用obj.filter
             load_full_data(obj, dir_res, headers)
         end
-        -- 放到timer中执行
+        -- 放到timer中执行，更新
         ngx_timer_at(0, _automatic_fetch, obj)
 
     else
@@ -1149,7 +1215,9 @@ function _M.close(self)
 end
 
 
+-- 返回 new(key, opts)创建的对象
 function _M.fetch_created_obj(key)
+    -- -- key为/routes 或 /upstream 等， value 为 new(key, opts) 返回的对象
     return created_obj[key]
 end
 

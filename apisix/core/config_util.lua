@@ -46,6 +46,7 @@ local function _iterate_values(self, tab)
 end
 
 
+-- 通过idx来访问元素，效率更高一点。仅限sequence
 function _M.iterate_values(tab)
     local iter = setmetatable({idx = 0}, {__call = _iterate_values})
     return iter, tab, 0

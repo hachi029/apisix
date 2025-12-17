@@ -25,16 +25,20 @@ local ipairs  = ipairs
 local _M = {version = 0.3}
 
 
+-- 路由信息更新时的回调, 即core.config.new("/routes", ...) 时传入的回调函数filter
 local function filter(route)
     route.orig_modifiedIndex = route.modifiedIndex
 
+    -- 标识要转发的node是否有域名节点
     route.has_domain = false
     if not route.value then
         return
     end
 
+    -- 设置插件的 plugin_conf._meta.parent_info 字段。parent_info标识plugin是内嵌在哪个实体上的
     set_plugins_meta_parent(route.value.plugins, route)
 
+    -- 将 route.value.host 或 route.value.hosts 转为小写
     if route.value.host then
         route.value.host = str_lower(route.value.host)
     elseif route.value.hosts then
@@ -43,25 +47,31 @@ local function filter(route)
         end
     end
 
+    -- 主要为更新upstream.nodes格式(hash格式改为array格式)。设置 route.has_domain、upstream.dns_nodes等字段
     apisix_upstream.filter_upstream(route.value.upstream, route)
 end
 
 
 -- 添加routes() 方法 和 init_worker()方法
+-- routes() 返回的是 config_etcd.values, config_etcd.conf_version
+-- init_worker()方法 主要创建 core.config.new("/routes", opts)
 -- attach common methods if the router doesn't provide its custom implementation
 local function attach_http_router_common_methods(http_router)
-    -- http_router.routes()返回的是 config_etcd.values
+    -- attach routes()方法
+    -- http_router.routes()返回的是 config_etcd.values, config_etcd.conf_version
     if http_router.routes == nil then
         http_router.routes = function ()
             if not http_router.user_routes then
                 return nil, nil
             end
 
+            -- user_routes 是 core.config.new("/routes", opt)的返回值
             local user_routes = http_router.user_routes
             return user_routes.values, user_routes.conf_version
         end
     end
 
+    -- attach init_worker 方法
     if http_router.init_worker == nil then
         http_router.init_worker = function (filter)
             http_router.user_routes = http_route.init_worker(filter)
@@ -71,11 +81,13 @@ end
 
 -- apisix.http_init_worker() --> .
 function _M.http_init_worker()
+    -- 读取conf/config.yaml
     local conf = core.config.local_conf()
     -- 默认的路由算法
     local router_http_name = "radixtree_uri"
     local router_ssl_name = "radixtree_sni"
 
+    -- 获取conf/config.yaml中配置的路由算法 router
     if conf and conf.apisix and conf.apisix.router then
         router_http_name = conf.apisix.router.http or router_http_name
         router_ssl_name = conf.apisix.router.ssl or router_ssl_name
@@ -88,7 +100,7 @@ function _M.http_init_worker()
     router_http.init_worker(filter)
     _M.router_http = router_http
 
-    -- 初始化https路由
+    -- 初始化https用于匹配sni的路由
     local router_ssl = require("apisix.ssl.router." .. router_ssl_name)
     router_ssl.init_worker()
     _M.router_ssl = router_ssl

@@ -88,5 +88,5 @@ pack-v*-linux.tgz*
 # release tar package
 *.tgz
 release/*
-
+deps
 

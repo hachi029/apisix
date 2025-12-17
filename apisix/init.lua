@@ -175,13 +175,18 @@ function _M.http_init_worker()
     require("apisix.consumer").init_worker()
     -- 15. consumer_group
     consumer_group.init_worker()
+    -- 16. secret
     apisix_secret.init_worker()
 
+    -- 17. global_rules
     apisix_global_rules.init_worker()
 
+    -- 18. upstream
     apisix_upstream.init_worker()
+    -- 19. 外部插件
     require("apisix.plugins.ext-plugin.init").init_worker()
 
+    -- 20. control_api_router
     control_api_router.init_worker()
     local_conf = core.config.local_conf()
 
@@ -208,11 +213,12 @@ function _M.http_exit_worker()
 end
 
 
---   ssl_certificate_by_lua_block {
---       apisix.ssl_phase()
---   }
+--ssl_certificate_by_lua_block {
+--    apisix.ssl_phase()
+--}
 -- 如果ssl会话复用，则不会执行此阶段
 function _M.ssl_phase()
+    -- apisix.ssl.router.radixtree_sni.set 设置证书和私钥
     local ok, err = router.router_ssl.set(ngx.ctx.matched_ssl)
     if not ok then
         if err then
@@ -224,9 +230,9 @@ end
 
 
 --- 1.ssl_client_hello->2.ssl_certificate->3.ssl_session_fetch->4.ssl_session_store
---    ssl_client_hello_by_lua_block {
---       apisix.ssl_client_hello_phase()
---   }
+-- ssl_client_hello_by_lua_block {
+--    apisix.ssl_client_hello_phase()
+--}
 function _M.ssl_client_hello_phase()
     local sni, err = apisix_ssl.server_name(true)
     if not sni or type(sni) ~= "string" then
@@ -236,18 +242,23 @@ function _M.ssl_client_hello_phase()
         core.log.error("failed to find SNI: " .. (err or advise))
         ngx_exit(-1)
     end
+    -- 是否需要 OCSP Stapling
     local tls_ext_status_req = apisix_ssl.get_status_request_ext()
 
     local ngx_ctx = ngx.ctx
+    -- 分配 api_ctx
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
 
-    -- 根据sni匹配并设置证书
+    -- 根据sni匹配并设置证书, 这里的 match_only 为true, 只进行sni匹配
+    -- apisix.ssl.router.radixtree_sni
     local ok, err = router.router_ssl.match_and_set(api_ctx, true, sni)
 
     ngx_ctx.matched_ssl = api_ctx.matched_ssl
+    -- 立即释放 api_ctx
     core.tablepool.release("api_ctx", api_ctx)
     ngx_ctx.api_ctx = nil
+    -- 是否需要OCSP Stapling
     ngx_ctx.tls_ext_status_req = tls_ext_status_req
 
     if not ok then
@@ -258,7 +269,7 @@ function _M.ssl_client_hello_phase()
         ngx_exit(-1)
     end
 
-    -- 设置 ssl_clt.set_protocols({"TLSv1.1", "TLSv1.2", "TLSv1.3"})
+    -- 根据匹配到的证书，设置 ssl_clt.set_protocols({"TLSv1.1", "TLSv1.2", "TLSv1.3"})
     ok, err = apisix_ssl.set_protocols_by_clienthello(ngx_ctx.matched_ssl.value.ssl_protocols)
     if not ok then
         core.log.error("failed to set ssl protocols: ", err)
@@ -271,13 +282,15 @@ function _M.ssl_client_hello_phase()
 end
 
 
+-- 将当前的ngx.ctx存入一个全局table中
 local function stash_ngx_ctx()
     local ref = ctxdump.stash_ngx_ctx()
     core.log.info("stash ngx ctx: ", ref)
+    -- ref为当前ngx.ctx在全局table中的索引
     ngx_var.ctx_ref = ref
 end
 
-
+-- 将之前的ngx.ctx从一个全局table中取出来
 local function fetch_ctx()
     local ref = ngx_var.ctx_ref
     core.log.info("fetch ngx ctx: ", ref)
@@ -286,6 +299,7 @@ local function fetch_ctx()
     return ctx
 end
 
+--  apisix.http_access_phase() -> handle_upstream() -> .
 -- 解析route上的域名
 -- 遍历nodes, 如果某个node是域名，则将其解析为ip
 local function parse_domain_in_route(route)
@@ -374,6 +388,7 @@ local function verify_tls_client(ctx)
 
     local matched_ssl = ctx.matched_ssl
     if matched_ssl.value.client and apisix_ssl.support_client_verification() then
+        -- ? https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#verify_client
         local res = ngx_var.ssl_client_verify
         if res ~= "SUCCESS" then
             if res == "NONE" then
@@ -394,6 +409,7 @@ local function verify_tls_client(ctx)
 end
 
 
+-- 用来匹配请求的 URI，如果匹配，则该请求将绕过客户端证书的检查，也就是跳过 MTLS。
 local function uri_matches_skip_mtls_route_patterns(ssl, uri)
     for _, pat in ipairs(ssl.value.client.skip_mtls_uri_regex) do
         if ngx_re_match(uri, pat,  "jo") then
@@ -403,16 +419,21 @@ local function uri_matches_skip_mtls_route_patterns(ssl, uri)
 end
 
 
+-- 客户端证书校验(用于双向认证场景)
 local function verify_https_client(ctx)
     local scheme = ctx.var.scheme
+    -- 非https协议，直接返回
     if scheme ~= "https" then
         return true
     end
 
     local matched_ssl = ngx.ctx.matched_ssl
+    -- client 表示证书是客户端证书，APISIX 访问上游时使用；server 表示证书是服务端证书，APISIX 验证客户端请求时使用。
     if matched_ssl.value.client
         and matched_ssl.value.client.skip_mtls_uri_regex
+        -- ngx_ssl.verify_client ~= nil
         and apisix_ssl.support_client_verification()
+        -- 用来匹配请求的 URI，如果匹配，则该请求将绕过客户端证书的检查，也就是跳过 MTLS。
         and (not uri_matches_skip_mtls_route_patterns(matched_ssl, ngx.var.uri)) then
         local res = ctx.var.ssl_client_verify
         if res ~= "SUCCESS" then
@@ -426,13 +447,17 @@ local function verify_https_client(ctx)
         end
     end
 
+    -- 使用http host 重新进行路由匹配
     local host = ctx.var.host
+    -- 只进行match
     local matched = router.router_ssl.match_and_set(ctx, true, host)
     if not matched then
         return true
     end
 
+    -- 匹配到的ssl
     local matched_ssl = ctx.matched_ssl
+    -- 进行客户端证书校验
     if matched_ssl.value.client and apisix_ssl.support_client_verification() then
         local verified = apisix_base_flags.client_cert_verified_in_handshake
         if not verified then
@@ -450,6 +475,7 @@ local function verify_https_client(ctx)
         end
 
         local sni = apisix_ssl.server_name()
+        -- 比较sni和host是否一致
         if sni ~= host then
             -- There is a case that the user configures a SSL object with `*.domain`,
             -- and the client accesses with SNI `a.domain` but uses Host `b.domain`.
@@ -525,13 +551,17 @@ end
 
 
 
+-- apisix.http_access_phase() -> .
 function _M.handle_upstream(api_ctx, route, enable_websocket)
     -- some plugins(ai-proxy...) request upstream by http client directly
+    -- bypass_nginx_upstream 说明请求不会被转发到upstream
     if api_ctx.bypass_nginx_upstream then
+        -- 执行全局插件和路由插件的before_proxy阶段
         common_phase("before_proxy")
         return
     end
 
+    -- Upstream 的地址信息可以直接配置到 Route（或 Service) 上，当 Upstream 有重复时，需要用“引用”方式避免重复
     local up_id = route.value.upstream_id
 
     -- used for the traffic-split plugin
@@ -541,7 +571,9 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 
     -- 如果router上配置了upstream_id
     if up_id then
+        -- 根据id获取到upstream
         local upstream = apisix_upstream.get_by_id(up_id)
+        -- 如果未获取到upstream, 则返回502
         if not upstream then
             if is_http then
                 return core.response.exit(502)
@@ -550,9 +582,11 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
             return ngx_exit(1)
         end
 
+        -- 记录upstream
         api_ctx.matched_upstream = upstream
 
     else
+        -- 说明是内嵌到route上的
         -- 如果route上配置的是域名
         if route.has_domain then
             local err
@@ -624,6 +658,7 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         return core.response.exit(502)
     end
 
+    -- 负载均衡算法选择出的node
     api_ctx.picked_server = server
 
     -- 设置往upstream转发的请求头
@@ -635,11 +670,13 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
     common_phase("before_proxy")
 
     local up_scheme = api_ctx.upstream_scheme
+    -- grpc 代理
     if up_scheme == "grpcs" or up_scheme == "grpc" then
         stash_ngx_ctx()
         return ngx.exec("@grpc_pass")
     end
 
+    -- dubbo 代理
     if api_ctx.dubbo_proxy_enabled then
         stash_ngx_ctx()
         return ngx.exec("@dubbo_pass")
@@ -647,7 +684,9 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
 end
 
 
+-- apisix.http_access_phase() -> .
 local function handle_x_forwarded_headers(api_ctx)
+    -- realip_remote_addr
     local addr_is_trusted = trusted_addresses_util.is_trusted(api_ctx.var.realip_remote_addr)
 
     -- Only untrusted values need to be overwritten or cleared.
@@ -735,18 +774,21 @@ function _M.http_access_phase()
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
 
+    -- 为ctx设置元表，当读取ctx变量时，调用元表中的方法
     core.ctx.set_vars_meta(api_ctx)
 
+    -- 客户端证书校验(用于双向认证场景)
     if not verify_https_client(api_ctx) then
         return core.response.exit(400)
     end
 
-    -- 根据http请求头来动态设置是否开启debug
+    -- 根据http请求头来动态设置是否开启debug， 设置 api_ctx.enable_dynamic_debug = true
     debug.dynamic_debug(api_ctx)
 
     local uri = api_ctx.var.uri
     -- if里边的逻辑主要是根据配置对uri格式化
     if local_conf.apisix then
+        -- 如果uri以/结尾，则删除最后的uri
         if local_conf.apisix.delete_uri_tail_slash then
             if str_byte(uri, #uri) == str_byte("/") then
                 api_ctx.var.uri = str_sub(api_ctx.var.uri, 1, #uri - 1)
@@ -754,6 +796,7 @@ function _M.http_access_phase()
             end
         end
 
+        -- normalize_uri_like_servlet
         if local_conf.apisix.normalize_uri_like_servlet then
             local new_uri, err = normalize_uri_like_servlet(uri)
             if not new_uri then
@@ -776,10 +819,14 @@ function _M.http_access_phase()
     -- args arguments in the request line
     api_ctx.var.request_uri = api_ctx.var.uri .. api_ctx.var.is_args .. (api_ctx.var.args or "")
 
+    -- X-Forwarded-[proto|host|port|For]
     handle_x_forwarded_headers(api_ctx)
 
+    -- 执行路由匹配， 根据配置可能有不同的实现 apisix.http.router.radixtree_xxx.lua
+    -- 路由匹配结果 api_ctx.matched_route，
     router.router_http.match(api_ctx)
 
+    -- 当上一步路由匹配成功后，api_ctx.matched_route 会被设置为匹配到的route
     local route = api_ctx.matched_route
     if not route then
         -- run global rule when there is no matching route
@@ -818,6 +865,7 @@ function _M.http_access_phase()
     -- 如果route上关联了service_id；route上不能内嵌service
     if route.value.service_id then
         local service = service_fetch(route.value.service_id)
+        -- 如果根据service_id没找到service配置，则返回404
         if not service then
             core.log.error("failed to fetch service configuration by ",
                            "id: ", route.value.service_id)
@@ -846,14 +894,15 @@ function _M.http_access_phase()
 
     -- run global rule
     local global_rules = apisix_global_rules.global_rules()
-    -- 会执行插件的rewrite和access方法
+    -- 会执行全局插件的rewrite和access方法
     plugin.run_global_rules(api_ctx, global_rules, nil)
 
     --执行route上配置的script https://apisix.apache.org/zh/docs/apisix/terminology/script/
-    -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，
-    -- Route 上配置的 Plugin 将不被执行。
+    -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，Route 上配置的 Plugin 将不被执行。
+    -- Script 也有执行阶段概念，支持 access、header_filter、body_filter 和 log 阶段。系统会在相应阶段中自动执行 Script 脚本中对应阶段的代码
     if route.value.script then
         script.load(route, api_ctx)
+        -- 执行script的access方法
         script.run("access", api_ctx)
 
     else
@@ -862,7 +911,7 @@ function _M.http_access_phase()
 
         -- 只有认证逻辑可以在 rewrite 阶段里面完成，其他需要在代理到上游之前执行的逻辑都是在 access 阶段完成的
         plugin.run_plugin("rewrite", plugins, api_ctx)
-        -- 如果启用了认证插件
+        -- api_ctx.consumer不为nil, 表示启用了认证插件
         if api_ctx.consumer then
             local changed
             local group_conf
@@ -889,6 +938,7 @@ function _M.http_access_phase()
                           ", config changed: ", changed)
 
             if changed then
+                -- 说明consumer上也配置了插件，此处需要执行consumer或consumer_group上配置的插件
                 api_ctx.matched_route = route
                 core.table.clear(api_ctx.plugins)
                 local phase = "rewrite_in_consumer"
@@ -897,6 +947,7 @@ function _M.http_access_phase()
                 plugin.run_plugin(phase, api_ctx.plugins, api_ctx)
             end
         end
+        -- 执行插件access阶段方法
         plugin.run_plugin("access", plugins, api_ctx)
     end
 
@@ -964,14 +1015,18 @@ end
 -- }
 --主要是执行插件的header_filter方法
 function _M.http_header_filter_phase()
+    -- 设置 Server 响应头
     core.response.set_header("Server", ver_header)
 
+    -- 上游状态码
     local up_status = get_var("upstream_status")
     if up_status then
-        set_resp_upstream_status(up_status)     -- 设置 X-APISIX-Upstream-Status 响应头
+        -- 设置 X-APISIX-Upstream-Status 响应头
+        set_resp_upstream_status(up_status)
     end
 
-    common_phase("header_filter")   -- 包括global_rules 和 路由上的plugins
+    -- 执行包括global_rules 和 route上plugins的header_filter方法
+    common_phase("header_filter")
 
     local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
@@ -997,6 +1052,7 @@ function _M.http_body_filter_phase()
     common_phase("delayed_body_filter")
 end
 
+-- apisix.http_log_phase() -> .
 -- 主要是根据上游返回的status和upstream被动健康检查配置调用checker的report_http_status
 local function healthcheck_passive(api_ctx)
     local checker = api_ctx.up_checker
@@ -1125,10 +1181,12 @@ function _M.http_log_phase()
         return
     end
 
+    -- 设置上游响应时间
     if not api_ctx.var.apisix_upstream_response_time or
     api_ctx.var.apisix_upstream_response_time == "" then
         api_ctx.var.apisix_upstream_response_time = ngx.var.upstream_response_time
     end
+    -- 执行全局插件和路由插件的log阶段方法
     local api_ctx = common_phase("log")
     if not api_ctx then
         return
@@ -1138,24 +1196,28 @@ function _M.http_log_phase()
     healthcheck_passive(api_ctx)
 
     if api_ctx.server_picker and api_ctx.server_picker.after_balance then
-        api_ctx.server_picker.after_balance(api_ctx, false)     -- 一些资源释放等
+        -- 一些资源释放等
+        api_ctx.server_picker.after_balance(api_ctx, false)
     end
 
-    core.ctx.release_vars(api_ctx)      -- 回收api_ctx
+    -- 回收api_ctx.var表
+    core.ctx.release_vars(api_ctx)
     if api_ctx.plugins then
-        core.tablepool.release("plugins", api_ctx.plugins)   -- 回收 plugins
+        -- 回收 plugins表
+        core.tablepool.release("plugins", api_ctx.plugins)
     end
 
     if api_ctx.curr_req_matched then
         core.tablepool.release("matched_route_record", api_ctx.curr_req_matched)
     end
 
+    -- 回收api_ctx表
     core.tablepool.release("api_ctx", api_ctx)
 end
 
---        balancer_by_lua_block {
---            apisix.http_balancer_phase()
---        }
+--balancer_by_lua_block {
+--    apisix.http_balancer_phase()
+--}
 -- 在失败重试时，会被多次执行
 -- https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream
 function _M.http_balancer_phase()
@@ -1201,11 +1263,11 @@ end
 do
     local router
 
---    location /apisix/admin {
---       content_by_lua_block {
---           apisix.http_admin()
---       }
---   }
+--location /apisix/admin {
+--    content_by_lua_block {
+--        apisix.http_admin()
+--    }
+--}
 function _M.http_admin()
     if not router then
         router = admin_init.get()
@@ -1227,11 +1289,11 @@ end
 
 end -- do
 
---   location / {
---      content_by_lua_block {
---          apisix.http_control()
---      }
---  }
+--location / {
+--    content_by_lua_block {
+--        apisix.http_control()
+--    }
+--}
 -- control-api 也是监听在一个单独的端口
 function _M.http_control()
     local ok = control_api_router.match(get_var("uri"))

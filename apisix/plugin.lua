@@ -41,7 +41,7 @@ local setmetatable  = setmetatable
 -- luacheck: globals load, ignore lua_load
 local lua_load          = load
 local is_http       = ngx.config.subsystem == "http"
--- 已加载的插件
+-- 已加载的插件, 元素为require("apisix.plugins." .. name)返回的插件对象，参考方法_M.load(config)
 local local_plugins = core.table.new(32, 0)
 -- 插件名称与插件的映射，key为plugin.name,value为require 返回的实例。记录了已经加载的插件
 local local_plugins_hash    = core.table.new(0, 32)
@@ -135,7 +135,7 @@ local function unload_plugin(name, plugin_type)
     pkg_loaded[pkg_name] = nil
 end
 
--- name: 插件名称； plugins_list: 出参 {}；
+-- name: 插件名称； plugins_list: 出参 {}；plugin_type: wasm/http/stream
 -- 1.require plugin ; 2.执行插件的init方法
 local function load_plugin(name, plugins_list, plugin_type)
     local ok, plugin
@@ -359,7 +359,7 @@ local function get_plugin_names(config)
 end
 
 -- init_worker -> plugin.init_worker-> load
--- 加载插件
+-- 加载插件(会重新加载)
 function _M.load(config)
     -- 从本地config.yaml里取出启用的插件名称
     local ignored, http_plugin_names, stream_plugin_names = get_plugin_names(config)
@@ -398,6 +398,7 @@ function _M.load(config)
 end
 
 
+-- apisix.http_exit_worker() -> .
 function _M.exit_worker()
     for name, plugin in pairs(local_plugins_hash) do
         local ty = PLUGIN_TYPE_HTTP
@@ -416,6 +417,7 @@ function _M.exit_worker()
 end
 
 
+-- 增加 Apisix-Plugins 响应头
 local function trace_plugins_info_for_debug(ctx, plugins)
     if not enable_debug() then
         return
@@ -431,6 +433,7 @@ local function trace_plugins_info_for_debug(ctx, plugins)
         return
     end
 
+    -- 存放所有插件的名称
     local t = {}
     for i = 1, #plugins, 2 do
         core.table.insert(t, plugins[i].name)
@@ -455,6 +458,7 @@ end
 -- 动态控制插件是否执行：https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E5%8A%A8%E6%80%81%E6%8E%A7%E5%88%B6%E6%8F%92%E4%BB%B6%E6%89%A7%E8%A1%8C%E7%8A%B6%E6%80%81
 local function meta_filter(ctx, plugin_name, plugin_conf)
     local filter = plugin_conf._meta and plugin_conf._meta.filter
+    -- 没配置filter
     if not filter then
         return true
     end
@@ -468,9 +472,11 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
 
     local ex, ok, err
     if ctx then
+        -- (key, version, create_obj_fun, ...)
         ex, err = expr_lrucache(plugin_name .. ctx.conf_type .. ctx.conf_id,
                                  ctx.conf_version, expr.new, filter)
     else
+        -- 构建expr
         ex, err = expr.new(filter)
     end
     if not ex then
@@ -478,6 +484,7 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
                          " plugin_name: ", plugin_name)
         return true
     end
+    -- 执行
     ok, err = ex:eval(ctx.var)
     if err then
         core.log.warn("failed to run the 'vars' expression: ", err,
@@ -485,13 +492,14 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
         return true
     end
 
+    -- 缓存执行的值
     ctx[match_cache_key] = ok
     return ok
 end
 
 
 -- 主要对插件进行排序，过滤不需要执行的插件
--- conf: rule; plugins: 出参 {}， 返回的也是 plugins
+-- conf: rule; plugins: 出参 {}， 返回的也是 plugins.元素为每2个一组，第一个为require加载的插件对象，第二个为etcd上的插件配置
 -- conf可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
 function _M.filter(ctx, conf, plugins, route_conf, phase)
     local user_plugin_conf = conf.value.plugins
@@ -505,18 +513,22 @@ function _M.filter(ctx, conf, plugins, route_conf, phase)
     end
 
     local custom_sort = false
-    -- 路由上的插件
+    -- 路由上的插件. 要执行的插件都合并到route上了
     local route_plugin_conf = route_conf and route_conf.value.plugins
     plugins = plugins or core.tablepool.fetch("plugins", 32, 0)
+    -- local_plugins为已加载的插件
     for _, plugin_obj in ipairs(local_plugins) do
         local name = plugin_obj.name
+        -- 获取插件配置 plugin_conf,
         local plugin_conf = user_plugin_conf[name]
 
-        if type(plugin_conf) ~= "table" then  -- type(nil) = nil
+        -- type(nil) = nil
+        if type(plugin_conf) ~= "table" then
             goto continue
         end
 
-        if check_disable(plugin_conf) then    -- 检查plugin_conf._meta.disable
+        -- 检查plugin_conf._meta.disable
+        if check_disable(plugin_conf) then
             goto continue
         end
 
@@ -843,7 +855,7 @@ do
             filter = function(item)
                 -- we need to pass 'item' instead of plugins_conf because
                 -- the latter one is nil at the first run
-                -- 加载插件
+                -- (重新)加载插件
                 _M.load(item)
             end,
         })
@@ -1185,8 +1197,10 @@ end
 _M.stream_check_schema = stream_check_schema
 
 
+-- 传入core.config.new("/routes", opts) 的checker函数
 function _M.plugin_checker(item, schema_type)
     if item.plugins then
+        -- check_schema
         local ok, err = check_schema(item.plugins, schema_type, true)
 
         if ok and enable_gde() then
@@ -1225,7 +1239,7 @@ local function run_meta_pre_function(conf, api_ctx, name)
 end
 
 -- 这个方法主要逻辑是执行插件对应阶段的方法。还包括了执行meta_filter来判断插件是否需要执行、meta_pre_function 执行前置脚本
--- plugins 待执行的插件，已经排好序了
+-- plugins 待执行的插件，已经排好序了。元素为每2个一组，第一个为require加载的插件对象，第二个为etcd上的插件配置
 -- return api_ctx, plugin_run , 第二个参数标识是否有插件被执行了
 function _M.run_plugin(phase, plugins, api_ctx)
     -- 标识是否有插件被执行了
@@ -1247,7 +1261,7 @@ function _M.run_plugin(phase, plugins, api_ctx)
         and phase ~= "body_filter"
         and phase ~= "delayed_body_filter"
     then
-        --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
+        --plugins[i] 插件实例require('apisix.plugins.key-auth') ; plugins[i+1] 为etcd上的插件配置
         for i = 1, #plugins, 2 do
 
             if phase == "rewrite_in_consumer" and plugins[i + 1]._skip_rewrite_in_consumer then
@@ -1257,9 +1271,10 @@ function _M.run_plugin(phase, plugins, api_ctx)
             local phase_func = phase == "rewrite_in_consumer" and plugins[i]["rewrite"]
                                or plugins[i][phase]
             if phase_func then
+                -- conf为为etcd上的插件配置
                 local conf = plugins[i + 1]
                 -- 执行plugin_conf._meta.filter, filter是一个表达式  {["arg_version", "==", "v2"]}
-                -- 动态控制插件是否执行
+                -- 执行plugin_conf._meta.filter, 动态控制插件是否执行
                 -- https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E9%80%9A%E7%94%A8%E9%85%8D%E7%BD%AE
                 if not meta_filter(api_ctx, plugins[i]["name"], conf)then
                     goto CONTINUE
@@ -1271,8 +1286,10 @@ function _M.run_plugin(phase, plugins, api_ctx)
                 local code, body = phase_func(conf, api_ctx) -- 执行插件方法
                 api_ctx._plugin_name = nil
                 --在请求转发到upstream之前的阶段，可以直接向客户端返回响应
+                -- 如果返回了code，body则直接向客户端发送响应
                 if code or body then
                     if is_http then
+                        -- http协议
                         if code >= 400 then
                             core.log.warn(plugins[i].name, " exits with http status code ", code)
 
@@ -1286,6 +1303,7 @@ function _M.run_plugin(phase, plugins, api_ctx)
 
                         core.response.exit(code, body)
                     else
+                        -- 非http协议
                         if code >= 400 then
                             core.log.warn(plugins[i].name, " exits with status code ", code)
                         end
@@ -1300,7 +1318,7 @@ function _M.run_plugin(phase, plugins, api_ctx)
         return api_ctx, plugin_run
     end
 
-    -- 以下是执行upstream返回请求后的相关逻辑
+    -- 以下是执行upstream返回请求后的相关逻辑（即phase为[log|header_filter|body_filter|delayed_body_filter]）
     for i = 1, #plugins, 2 do
         local phase_func = plugins[i][phase]
         local conf = plugins[i + 1]
@@ -1316,17 +1334,25 @@ function _M.run_plugin(phase, plugins, api_ctx)
     return api_ctx, plugin_run
 end
 
+-- https://apisix.apache.org/zh/docs/apisix/admin-api/#plugin-metadata
+-- 这段逻辑主要设置插件的plugin_conf._meta.parent 字段
 function _M.set_plugins_meta_parent(plugins, parent)
     if not plugins then
         return
     end
+    -- 遍历每个插件
     for _, plugin_conf in pairs(plugins) do
+        -- 如果_meta为nil, 则进行初始化
         if not plugin_conf._meta then
             plugin_conf._meta = {}
         end
+        -- 设置plugin_conf._meta.parent
         if not plugin_conf._meta.parent then
+            --构造parent
             local parent_info = {
+                -- parent_key
                 resource_key = parent.key,
+                -- parent_conf_version
                 resource_version = tostring(parent.modifiedIndex)
             }
             local mt_table = getmetatable(plugin_conf._meta)
@@ -1342,7 +1368,7 @@ end
 
 
 -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
--- 一个global_rule可以包含多个插件
+-- 一个global_rule可以包含多个插件， 如果phase_name=nil, 会执行插件的rewrite和access方法
 function _M.run_global_rules(api_ctx, global_rules, phase_name)
     if global_rules and #global_rules > 0 then
         local orig_conf_type = api_ctx.conf_type
@@ -1364,7 +1390,7 @@ function _M.run_global_rules(api_ctx, global_rules, phase_name)
 
             core.table.clear(plugins)
             -- 对需要执行的插件进行排序，过滤不需要执行的插件
-            -- 返回的也是入参plugins
+            -- 传入的plugins为空table, 返回的也是入参plugins,  元素为每2个一组，第一个为require加载的插件对象，第二个为etcd上的插件配置
             plugins = _M.filter(api_ctx, global_rule, plugins, route)
             if phase_name == nil then
                 _M.run_plugin("rewrite", plugins, api_ctx)
@@ -1375,6 +1401,7 @@ function _M.run_global_rules(api_ctx, global_rules, phase_name)
         end
         core.tablepool.release("plugins", plugins)
 
+        -- 恢复 conf_type/conf_version/conf_id
         api_ctx.conf_type = orig_conf_type
         api_ctx.conf_version = orig_conf_version
         api_ctx.conf_id = orig_conf_id

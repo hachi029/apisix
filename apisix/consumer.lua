@@ -14,6 +14,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
+-- apisix/core.lua
 local core           = require("apisix.core")
 local config_local   = require("apisix.core.config_local")
 local secret         = require("apisix.secret")
@@ -25,6 +26,7 @@ local ipairs         = ipairs
 local pairs          = pairs
 local type           = type
 local string_sub     = string.sub
+-- core.config.new("/consumers", cfg)
 local consumers
 
 
@@ -41,6 +43,7 @@ local lrucache = core.lrucache.new({
 -- taking into account the appropriate adjustment coefficient.
 local consumers_count_for_lrucache = 4096
 
+-- 去掉etcd配置key的prefix
 local function remove_etcd_prefix(key)
     local prefix = ""
     local local_conf = config_local.local_conf()
@@ -287,6 +290,7 @@ function _M.find_consumer(plugin_name, key, key_value)
 end
 
 
+-- check_schema
 local function check_consumer(consumer, key)
     local data_valid
     local err
@@ -303,6 +307,7 @@ local function check_consumer(consumer, key)
 end
 
 
+-- apisix.http_init_worker() -> .
 function _M.init_worker()
     local err
     local cfg = {

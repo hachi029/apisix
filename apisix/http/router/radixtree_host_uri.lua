@@ -34,12 +34,14 @@ local only_uri_router
 local _M = {version = 0.1}
 
 
+-- route 为要处理的一条路由
+-- host_routes 的格式为二级hash如 host_routes[host][uri]
 local function push_host_router(route, host_routes, only_uri_routes)
     if type(route) ~= "table" then
         return
     end
 
-    -- route.script配置项目
+    -- route.filter_fun 配置项
     local filter_fun, err
     if route.value.filter_func then
         filter_fun, err = loadstring(
@@ -71,7 +73,7 @@ local function push_host_router(route, host_routes, only_uri_routes)
         end
     end
 
-    -- 没有传hosts, 因为host已经在外层匹配过了。
+    -- 一条路由的构建参数。 没有传hosts, 因为host已经在外层匹配过了。
     local radixtree_route = {
         paths = route.value.uris or route.value.uri,
         methods = route.value.methods,
@@ -94,8 +96,9 @@ local function push_host_router(route, host_routes, only_uri_routes)
         return
     end
 
-    -- 对每个host主机名，插入对应的路由配置
+    -- 一条路由上可以同时配置多个host. 此处对route上每个host主机名，插入对应的路由配置
     for i, host in ipairs(hosts) do
+        -- 倒置,除了类似如 *.test.com 的形式
         local host_rev = host:reverse()
         if not host_routes[host_rev] then
             host_routes[host_rev] = {radixtree_route}
@@ -106,6 +109,7 @@ local function push_host_router(route, host_routes, only_uri_routes)
 end
 
 
+-- host_uri为两级，先根据host倒置匹配到sub_router, 再执行sub_router根据uri进行匹配
 local function create_radixtree_router(routes)
     -- key为虚拟主机的reverse。 value为 https://github.com/api7/lua-resty-radixtree#new routes参数
     local host_routes = {} -- group by vhost
@@ -116,16 +120,17 @@ local function create_radixtree_router(routes)
     -- 遍历所有的routes配置，group by host 到host_routes 中
     for _, route in ipairs(routes) do
         local status = core.table.try_read_attr(route, "value", "status")
-        -- check the status
+        -- check the status， 如果未禁用
         if not status or status == 1 then
             push_host_router(route, host_routes, only_uri_routes)
         end
     end
 
-    --针对每个host, 创建router
     -- create router: host_router
     local host_router_routes = {}
+    --针对每个host, 创建sub_router
     for host_rev, routes in pairs(host_routes) do
+        -- 创建子路由器
         local sub_router = router.new(routes)       -- sub_router
 
         core.table.insert(host_router_routes, {

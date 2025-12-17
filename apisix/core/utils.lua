@@ -91,12 +91,14 @@ function _M.get_seed_from_urandom()
 end
 
 
+-- 根据'/'分割
 function _M.split_uri(uri)
     return ngx_re.split(uri, "/")
 end
 
 
 local function dns_parse(domain, selector)
+    -- 如果dns服务器发生了变更， 重构 dns_client.new(opts)
     if dns_resolvers ~= current_inited_resolvers then
         local local_conf = config_local.local_conf()
         local valid = table.try_read_attr(local_conf, "apisix", "dns_resolver_valid")
@@ -278,13 +280,16 @@ end
 
 
 local function sleep(sec)
+    -- 如果sec <= 1，则直接调用ngx.sleep
     if sec <= max_sleep_interval then
         return ngx_sleep(sec)
     end
+    -- 否则先 sleep max_sleep_interval
     ngx_sleep(max_sleep_interval)
     if exiting() then
         return
     end
+    -- 递归调用
     sec = sec - max_sleep_interval
     return sleep(sec)
 end

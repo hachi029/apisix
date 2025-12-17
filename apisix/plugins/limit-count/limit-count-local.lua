@@ -14,6 +14,7 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 --
+-- https://github.com/api7/lua-resty-limit-traffic/blob/master/lib/resty/limit/count.md
 local limit_count = require("resty.limit.count")
 
 local ngx = ngx
@@ -63,7 +64,9 @@ function _M.new(plugin_name, limit, window)
     return setmetatable(self, mt)
 end
 
+-- cost 为本次消费的个数, 一般为1
 function _M.incoming(self, key, commit, conf, cost)
+    -- 没有使用官方的resty.limit.count库, https://github.com/api7/lua-resty-limit-traffic
     local delay, remaining = self.limit_count:incoming(key, commit, cost)
     local reset
 

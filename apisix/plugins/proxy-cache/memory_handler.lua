@@ -134,13 +134,15 @@ local function parse_resource_ttl(ctx, cc)
     return max_age and max(max_age, 0) or 0
 end
 
--- 请求是否可以从缓存中获取相应
+-- 请求是否可以从缓存中获取响应
 local function cacheable_request(conf, ctx, cc)
     if not util.match_method(conf, ctx) then   -- 根据conf.cache_method判断该请求是否可以
         return false, "MISS"
     end
 
-    if conf.cache_bypass ~= nil then  -- 该属性的值不为空或者非 0 时则会跳过缓存检查
+    -- 一个或多个用于解析值的参数，如果任何值不为空且不等于 0，则不会从缓存中检索响应
+    if conf.cache_bypass ~= nil then
+        -- 该属性的值不为空或者非 0 时则会跳过缓存检查
         local value = util.generate_complex_value(conf.cache_bypass, ctx)
         core.log.info("proxy-cache cache bypass value:", value)
         if value ~= nil and value ~= "" and value ~= "0" then
@@ -148,6 +150,7 @@ local function cacheable_request(conf, ctx, cc)
         end
     end
 
+    -- conf.cache_control 如果为 true，则遵守 HTTP 规范中的 Cache-Control 行为
     if conf.cache_control and (cc["no-store"] or cc["no-cache"]) then
         return false, "BYPASS"
     end
@@ -170,10 +173,12 @@ local function cacheable_response(conf, ctx, cc)
         end
     end
 
+    -- conf.cache_control 如果为 true，则遵守 HTTP 规范中的 Cache-Control 行为
     if conf.cache_control and (cc["private"] or cc["no-store"] or cc["no-cache"]) then
         return false
     end
 
+    -- conf.cache_control 如果为 true，则遵守 HTTP 规范中的 Cache-Control 行为
     if conf.cache_control and parse_resource_ttl(ctx, cc) <= 0 then
         return false
     end
@@ -183,11 +188,12 @@ end
 
 
 function _M.access(conf, ctx)
+    -- 解析cache_control请求头
     local cc = parse_directive_header(ctx.var.http_cache_control)
 
     if ctx.var.request_method ~= "PURGE" then
         local ret, msg = cacheable_request(conf, ctx, cc)
-        if not ret then     -- 不进行缓存
+        if not ret then     -- ret为false, 则不从缓存中获取响应
             core.response.set_header("Apisix-Cache-Status", msg)
             return
         end
@@ -204,7 +210,8 @@ function _M.access(conf, ctx)
     -- 实现为ngx_shared 进程间共享内存
     local res, err = ctx.cache.memory:get(ctx.var.upstream_cache_key)
 
-    if ctx.var.request_method == "PURGE" then       --清理缓存
+    -- 清理缓存
+    if ctx.var.request_method == "PURGE" then
         if err == "not found" then
             return 404
         end
@@ -221,6 +228,7 @@ function _M.access(conf, ctx)
             core.response.set_header("Apisix-Cache-Status", "MISS")
             core.log.error("failed to get from cache, err: ", err)
 
+        -- conf.cache_control 如果为 true，则遵守 HTTP 规范中的 Cache-Control 行为
         elseif conf.cache_control and cc["only-if-cached"] then
             core.response.set_header("Apisix-Cache-Status", "MISS")
             return 504
@@ -287,6 +295,7 @@ function _M.header_filter(conf, ctx)
     local res_headers = ngx.resp.get_headers(0, true)
 
     for key in pairs(res_headers) do
+        -- 隐藏cache_headers
         if conf.hide_cache_headers == true and include_cache_header(key) then
             core.response.set_header(key, "")
         end
@@ -309,6 +318,7 @@ function _M.body_filter(conf, ctx)
         return
     end
 
+    -- 读取响应体
     local res_body = core.response.hold_body_chunk(ctx, true)
     if not res_body then
         return
@@ -324,6 +334,7 @@ function _M.body_filter(conf, ctx)
         version   = CACHE_VERSION,
     }
 
+    -- 存储响应
     local res, err = cache.memory:set(ctx.var.upstream_cache_key, res, cache.ttl)
     if not res then
         core.log.error("failed to set cache, err: ", err)

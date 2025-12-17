@@ -107,7 +107,9 @@ local schema = {
 }
 
 --https://apisix.apache.org/zh/docs/apisix/plugins/proxy-cache/
--- 支持基于磁盘和内存的缓存
+-- 支持基于磁盘和内存的缓存。提供了根据缓存键缓存响应的功能
+-- 基于磁盘，是利用Nginx原生能力
+-- 基于内存，使用的是 shdict
 local _M = {
     version = 0.2,
     priority = 1085,
@@ -116,13 +118,17 @@ local _M = {
 }
 
 
+-- 插件配置conf的格式校验
 function _M.check_schema(conf)
+    -- schema校验
     local ok, err = core.schema.check(schema, conf)
     if not ok then
         return false, err
     end
 
+    --conf.cache_key 用于缓存的键。支持NGINX 变量和值中的常量字符串。变量应该以 $ 符号为前缀
     for _, key in ipairs(conf.cache_key) do
+        -- 不能仅仅使用请求方法
         if key == "$request_method" then
             return false, "cache_key variable " .. key .. " unsupported"
         end
@@ -130,10 +136,13 @@ function _M.check_schema(conf)
 
     local found = false
     local local_conf = core.config.local_conf()
+    -- 校验conf/config.yaml中关于proxy_cache的配置
     if local_conf.apisix.proxy_cache then
         local err = "cache_zone " .. conf.cache_zone .. " not found"
+        -- 遍历所有的zones, 查找插件配置conf里的cache_zone是否已经在conf/config.yaml中预先配置了
         for _, cache in ipairs(local_conf.apisix.proxy_cache.zones) do
             -- cache_zone passed in plugin config matched one of the proxy_cache zones
+            -- 找到了
             if cache.name == conf.cache_zone then
                 -- check for the mismatch between cache_strategy and corresponding cache zone
                 if (conf.cache_strategy == STRATEGY_MEMORY and cache.disk_path) or
@@ -158,8 +167,9 @@ end
 function _M.access(conf, ctx)
     core.log.info("proxy-cache plugin access phase, conf: ", core.json.delay_encode(conf))
 
-    -- cache_key array[string]. 如["$host", "$request_uri"]
+    -- 生成cache_key array[string]. 如["$host", "$request_uri"]
     local value = util.generate_complex_value(conf.cache_key, ctx) --解析变量
+    -- 设置变量 upstream_cache_key
     ctx.var.upstream_cache_key = value
     core.log.info("proxy-cache cache key value:", value)
 

@@ -406,6 +406,7 @@ do
             return val
         end,
 
+        -- get
         __newindex = function(t, key, val)
             if ngx_var_names[key] then
                 ngx_var[key] = val
@@ -453,6 +454,7 @@ function _M.register_var(name, getter, opts)
     end
 end
 
+-- 为ctx设置元表，当读取ctx变量时，调用元表中的方法
 function _M.set_vars_meta(ctx)
     local var = tablepool.fetch("ctx_var", 0, 32)
     if not var._cache then
@@ -465,6 +467,7 @@ function _M.set_vars_meta(ctx)
     ctx.var = var
 end
 
+-- 释放ctx.var表
 function _M.release_vars(ctx)
     if ctx.var == nil then
         return

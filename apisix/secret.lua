@@ -34,8 +34,10 @@ local _M = {}
 -- https://apisix.apache.org/zh/docs/apisix/terminology/secret/
 
 local PREFIX = "$secret://"
+-- secrets = core.config.new("/secrets", cfg)
 local secrets
 
+-- schema校验
 local function check_secret(conf)
     local idx = find(conf.id or "", "/")
     if not idx then
@@ -43,11 +45,13 @@ local function check_secret(conf)
     end
     local manager = sub(conf.id, 1, idx - 1)
 
+    -- manager是否合法，(aws/gcp/vault)
     local ok, secret_manager = pcall(require, "apisix.secret." .. manager)
     if not ok then
         return false, "secret manager not exits, manager: " .. manager
     end
 
+    -- schema校验
     return core.schema.check(secret_manager.schema, conf)
 end
 
@@ -73,14 +77,17 @@ function _M.secrets()
         return nil, nil
     end
 
+    -- https://apisix.apache.org/zh/docs/apisix/admin-api/#secret
+    -- 返回etcd目录 /secrets 的配置值和版本
     return secrets.values, secrets.conf_version
 end
 
 
+-- apisix.http_init_worker() -> .
 function _M.init_worker()
     local cfg = {
         automatic = true,
-        checker = check_secret,
+        checker = check_secret, --数据格式校验
     }
 
     secrets = core.config.new("/secrets", cfg)
@@ -103,18 +110,21 @@ end
 
 _M.check_secret_uri = check_secret_uri
 
--- secret_uri: $secret://
+-- secret_uri: $secret://$manager/$id/$secret_name/$key
 -- return opts = {
 --        manager = manager,
---        confid = confid,
+--        confid = confid,      --$id
 --        key = key
 --    }
+-- manager为秘钥管理器，参考apisix/secret/$manager.lua
 local function parse_secret_uri(secret_uri)
+    -- 检查secret_uri是否以 "$secret://" 或 "$ENV://" 开头
     local is_secret_uri, err = check_secret_uri(secret_uri)     --j
     if not is_secret_uri then
         return is_secret_uri, err
     end
 
+    -- 去掉$secret://
     local path = sub(secret_uri, #PREFIX + 1)
     local idx1 = find(path, "/")
     if not idx1 then
@@ -141,11 +151,12 @@ local function parse_secret_uri(secret_uri)
     return opts
 end
 
--- secret_uri is like: $secret://
+-- secret_uri is like: $secret://$manager/$id/$secret_name/$key
 -- 这个方法读取secret_uri代表的秘钥
 local function fetch_by_uri_secret(secret_uri)
     core.log.info("fetching data from secret uri: ", secret_uri)
-    local opts, err = parse_secret_uri(secret_uri)      -- 解析secret_uri中的信息为opts
+    -- 解析secret_uri中的信息为{$manager,$id, $secret_name/$key}
+    local opts, err = parse_secret_uri(secret_uri)
     if not opts then
         return nil, err
     end
@@ -156,6 +167,7 @@ local function fetch_by_uri_secret(secret_uri)
         return nil, "no secret conf, secret_uri: " .. secret_uri
     end
 
+    -- 获取秘钥管理器
     local ok, sm = pcall(require, "apisix.secret." .. opts.manager)
     if not ok then
         return nil, "no secret manager: " .. opts.manager
@@ -174,21 +186,25 @@ _M.fetch_by_uri = fetch_by_uri_secret
 
 -- 读取uri代表的秘钥，uri类似
 local function new_lrucache()
+    -- 读取本地配置config.yaml 中配置项 apisix.lru.secret.ttl
     local ttl = core.table.try_read_attr(local_conf, "apisix", "lru", "secret", "ttl")
     if not ttl then
         ttl = 300
     end
 
+    -- 读取本地配置config.yaml 中配置项 apisix.lru.secret.count
     local count = core.table.try_read_attr(local_conf, "apisix", "lru", "secret", "count")
     if not count then
         count = 512
     end
 
+    -- 读取本地配置config.yaml 中配置项 apisix.lru.secret.neg_ttl
     local neg_ttl = core.table.try_read_attr(local_conf, "apisix", "lru", "secret", "neg_ttl")
     if not neg_ttl then
         neg_ttl = 60  -- 1 minute default for failures
     end
 
+    -- 读取本地配置config.yaml 中配置项 apisix.lru.secret.neg_count
     local neg_count = core.table.try_read_attr(local_conf, "apisix", "lru", "secret", "neg_count")
     if not neg_count then
         neg_count = 512
@@ -197,6 +213,7 @@ local function new_lrucache()
     core.log.info("secret lrucache ttl: ", ttl, ", count: ", count,
                   ", neg_ttl: ", neg_ttl, ", neg_count: ", neg_count)
 
+    -- 返回的是一个function (key, version, create_obj_fun, ...)
     return core.lrucache.new({
         ttl = ttl,
         count = count,
@@ -211,21 +228,25 @@ local secrets_cache = new_lrucache()
 
 
 
+-- 解析secret, 第一个字符必须是$
 local function fetch(uri, use_cache)
     -- do a quick filter to improve retrieval speed
-    if byte(uri, 1, 1) ~= byte('$') then
+    if byte(uri, 1, 1) ~= byte('$') then    -- 取第一个字符
         return nil
     end
 
     local fetch_by_uri
-    if string.has_prefix(upper(uri), core.env.PREFIX) then
+    if string.has_prefix(upper(uri), core.env.PREFIX) then    -- $ENV://
+        -- $ENV://$env_name/$sub_key
         fetch_by_uri = core.env.fetch_by_uri
-    elseif string.has_prefix(uri, PREFIX) then
+    elseif string.has_prefix(uri, PREFIX) then                -- $secret://
+        -- $secret://$manager/$id/$secret_name/$key
         fetch_by_uri = fetch_by_uri_secret
     else
         return nil
     end
 
+    -- 如果不使用缓存，直接进行解析
     if not use_cache then
         local val, err = fetch_by_uri(uri)
         if err then
@@ -235,9 +256,11 @@ local function fetch(uri, use_cache)
         return val
     end
 
+    -- 先从缓存中获取, (key, version, create_obj_fun, ...)
     return secrets_cache(uri, "", fetch_by_uri, uri)
 end
 
+-- 解析秘钥, v必须以$开头
 local function retrieve_refs(refs, use_cache)
     for k, v in pairs(refs) do
         local typ = type(v)
@@ -250,6 +273,14 @@ local function retrieve_refs(refs, use_cache)
     return refs
 end
 
+-- https://apisix.apache.org/zh/docs/apisix/terminology/secret/
+-- 凡是value为 $xxx 开头的，都尝试将其解析为具体值
+-- 支持通过以下方式存储密钥：
+-- 环境变量 格式为($ENV://$env_name/$sub_key)
+-- HashiCorp Vault      格式为($secret://$vault/$id/$secret_name/$key)
+-- AWS Secrets Manager  格式为($secret://$aws/$id/$secret_name/$key)
+-- GCP Secrets Manager  格式为($secret://$gcp/$id/$secret_name/$key)
+-- refs可以是table, 也可以是string, 但每一项必须以$开头
 function _M.fetch_secrets(refs, use_cache)
     if not refs or type(refs) ~= "table" then
         return nil

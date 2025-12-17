@@ -27,6 +27,7 @@ local _M = {
 }
 
 
+-- 处理service内嵌，如route上配置的service_id.
 function _M.get(service_id)
     return services:get(service_id)
 end
