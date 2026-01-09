@@ -77,6 +77,7 @@ local _M = {
 }
 
 
+-- 读取配置conf/config.yaml 中的plugin_attr.plugin_name
 local function plugin_attr(name)
     -- TODO: get attr from synchronized data
     local local_conf = core.config.local_conf()
@@ -136,7 +137,7 @@ local function unload_plugin(name, plugin_type)
 end
 
 -- name: 插件名称； plugins_list: 出参 {}；plugin_type: wasm/http/stream
--- 1.require plugin ; 2.执行插件的init方法
+-- 1.require "apisix.plugins." .. name ; 2.执行插件的init方法
 local function load_plugin(name, plugins_list, plugin_type)
     local ok, plugin
     --1. require plugin
@@ -198,7 +199,8 @@ local function load_plugin(name, plugins_list, plugin_type)
     end
 
     plugin.name = name
-    plugin.attr = plugin_attr(name) -- plugin_attr, apisix.cli.config.lua
+    -- 读取配置conf/config.yaml 中的配置项 plugin_attr.plugin_name
+    plugin.attr = plugin_attr(name)
     core.table.insert(plugins_list, plugin)
 
     -- 插件初始化
@@ -1300,7 +1302,8 @@ function _M.run_plugin(phase, plugins, api_ctx)
                                 body = conf._meta.error_response
                             end
                         end
-
+                        -- 调用ngx.exit() https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxexit
+                        -- When status >= 200 (i.e., ngx.HTTP_OK and above), it will interrupt the execution of the current request and return status code to Nginx.
                         core.response.exit(code, body)
                     else
                         -- 非http协议

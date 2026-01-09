@@ -828,6 +828,7 @@ function _M.http_access_phase()
 
     -- 当上一步路由匹配成功后，api_ctx.matched_route 会被设置为匹配到的route
     local route = api_ctx.matched_route
+    -- route就是etcd上配置的route实体
     if not route then
         -- run global rule when there is no matching route
         -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
@@ -858,7 +859,7 @@ function _M.http_access_phase()
         end
 
         -- conf: plugin_config_confs
-        -- 返回的还是入参 route
+        -- 返回的还是入参 route。plugin_config、consumer、service、upstream等上配置的插件，最后都会合并到route上
         route = plugin_config.merge(route, conf)
     end
 

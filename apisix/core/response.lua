@@ -48,6 +48,7 @@ do
     local t = {}
     local idx = 1
 
+-- ngx.exit(code, body) ... 支持table
 function resp_exit(code, ...)
     clear_tab(t)
     idx = 0
@@ -58,6 +59,7 @@ function resp_exit(code, ...)
         code = nil
     end
 
+    -- 设置状态码
     if code then
         ngx.status = code
     end
@@ -81,10 +83,13 @@ function resp_exit(code, ...)
         end
     end
 
+    -- 输出响应体
     if idx > 0 then
         ngx_print(t)
     end
 
+    -- 调用ngx.exit(code), 返回到nginx
+    -- https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxexit
     if code then
         return ngx_exit(code)
     end

@@ -333,6 +333,8 @@ function _M.get_format(res, real_key, is_dir, formatter)
 end
 
 
+-- v3res 格式化为 v2res
+-- v3res: [{"kv":{"value":{"plugins":{"public-api":{}},"id":"1","uri":"/apisix/batch-requests","update_time":1764225975,"create_time":1764157231},"version":"16","key":"/apisix/routes/1","create_revision":"68","mod_revision":"385"}}]
 function _M.watch_format(v3res)
     local v2res = {}
     v2res.headers = {

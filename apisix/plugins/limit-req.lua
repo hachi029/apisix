@@ -125,6 +125,7 @@ end
 
 
 function _M.access(conf, ctx)
+    -- 获取limiter对象
     local lim, err = core.lrucache.plugin_ctx(lrucache, ctx, nil,
                                               create_limit_obj, conf)
     if not lim then

@@ -262,6 +262,7 @@ local function refresh_stale_objs()
     for lru_obj, keys in pairs(stale_obj_pool) do
         -- 执行lrucache中的每个需要刷新缓存的key。 参考fetch_valid_cache()方法
         for key, new_obj in pairs(keys) do
+            -- 执行加载缓存方法
             local obj, err = new_obj.fn(unpack(new_obj.args))
             if obj ~= nil then
                 lru_obj:set(key, {val = obj, ver = new_obj.ver}, new_obj.ttl)

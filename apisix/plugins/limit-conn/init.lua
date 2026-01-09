@@ -96,7 +96,7 @@ function _M.increase(conf, ctx)
         -- When the value of key is empty, use client IP instead
         key = ctx.var["remote_addr"]
     end
-
+    -- 123route397
     key = key .. ctx.conf_type .. ctx.conf_version
     core.log.info("limit key: ", key)
 

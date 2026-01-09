@@ -32,7 +32,7 @@ local lrucache = core.lrucache.new({
     ttl = 300, count = 100
 })
 
-
+-- \${host}|${host}|$host|$
 local reg = [[(\\\$[0-9a-zA-Z_]+)|]]         -- \$host
             .. [[\$\{([0-9a-zA-Z_]+)\}|]]    -- ${host}
             .. [[\$([0-9a-zA-Z_]+)|]]        -- $host
@@ -76,6 +76,7 @@ local _M = {
 }
 
 
+-- 提取uri中的所有变量
 local function parse_uri(uri)
     local iterator, err = re_gmatch(uri, reg, "jiox")
     if not iterator then
@@ -126,6 +127,7 @@ end
 
 
     local tmp = {}
+-- 解析uri,构建新的重定向url。uri为配置的要重定向到的 URI，可以包含 NGINX 变量。如${uri}/index.html
 local function concat_new_uri(uri, ctx)
     local passed_uri_segs, err = lrucache(uri, nil, parse_uri, uri)
     if not passed_uri_segs then
@@ -151,8 +153,12 @@ local function concat_new_uri(uri, ctx)
     return tab_concat(tmp, "")
 end
 
+-- 获取重定向返回的port
+-- 1.从配置文件（conf/config.yaml）中的attr读取 plugin_attr.redirect.https_port
+-- 2. 从apisix.ssl.listen.ports中随机获取一个
 local function get_port(attr)
     local port
+    -- 1. 直接返回 https_port
     if attr then
         port = attr.https_port
     end
@@ -163,10 +169,12 @@ local function get_port(attr)
 
     local local_conf = core.config.local_conf()
     local ssl = core.table.try_read_attr(local_conf, "apisix", "ssl")
+    -- 如果未启用ssl , 直接返回
     if not ssl or not ssl["enable"] then
         return port
     end
 
+    -- 否则随机返回一个apisix.ssl.listen中的ports数组的元素
     local ports = ssl["listen"]
     if ports and #ports > 0 then
         local idx = math_random(1, #ports)
@@ -182,16 +190,22 @@ end
 function _M.rewrite(conf, ctx)
     core.log.info("plugin rewrite phase, conf: ", core.json.delay_encode(conf))
 
+    -- HTTP 响应码, 默认为302
     local ret_code = conf.ret_code
 
+    -- 从配置文件（conf/config.yaml）中读取 plugin_attr.redirect.https_port
     local attr = plugin.plugin_attr(plugin_name)
+    -- 重定向端口
     local ret_port = get_port(attr)
 
+    -- 要重定向到的 URI，可以包含 NGINX 变量。
     local uri = conf.uri
-    local regex_uri = conf.regex_uri  -- 将来自客户端的 URL 与正则表达式匹配并重定向
+    -- 将来自客户端的 URL 与正则表达式匹配并重定向。uri和regex_uri只能有一个有效
+    local regex_uri = conf.regex_uri
 
     local proxy_proto = core.request.header(ctx, "X-Forwarded-Proto")
     local _scheme = proxy_proto or core.request.get_scheme(ctx)
+    -- 说明是要将http请求重定向到https端口
     if conf.http_to_https and _scheme ~= "https" then
         if ret_port == nil or ret_port == 443 or ret_port <= 0 or ret_port > 65535  then
             uri = "https://$host$request_uri"
@@ -199,6 +213,7 @@ function _M.rewrite(conf, ctx)
             uri = "https://$host:" .. ret_port .. "$request_uri"
         end
 
+        -- 根据请求方法不同，返回的状态码不同
         local method_name = ngx.req.get_method()
         if method_name == "GET" or method_name == "HEAD" then
             ret_code = 301
@@ -208,7 +223,9 @@ function _M.rewrite(conf, ctx)
         end
     end
 
+    --
     if ret_code then
+        -- 即最终将要重定向到的地址
         local new_uri
         if uri then     --配置的重定向到的 URI，可以包含nginx变量
             local err
@@ -218,6 +235,8 @@ function _M.rewrite(conf, ctx)
                 return 500
             end
         elseif regex_uri then   --将来自客户端的 URL 与正则表达式匹配并重定向
+            -- 将来自客户端的 URL 与正则表达式匹配并重定向。当匹配成功后使用模板替换发送重定向到客户端，如果未匹配成功会将客户端请求的 URI 转发至上游。
+            -- 和 uri 不可以同时存在。例如：["^/iresty/(.)/(.)/(.*)","/$1-$2-$3"]
             local n, err
             new_uri, n, err = re_sub(ctx.var.uri, regex_uri[1],
                                      regex_uri[2], "jo")
@@ -247,6 +266,7 @@ function _M.rewrite(conf, ctx)
             end
         end
 
+        -- append args
         if conf.append_query_string and ctx.var.is_args == "?" then
             if index then
                 new_uri = new_uri .. "&" .. (ctx.var.args or "")
@@ -255,6 +275,7 @@ function _M.rewrite(conf, ctx)
             end
         end
 
+        -- set Location响应头
         core.response.set_header("Location", new_uri)
         return ret_code
     end

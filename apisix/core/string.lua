@@ -46,6 +46,7 @@ setmetatable(_M, {__index = string})
 
 -- find a needle from a haystack in the plain text way
 -- note: Make sure that the haystack is 'string' type, otherwise an exception will be thrown.
+-- _M.find(src_str, target, from)
 function _M.find(haystack, needle, from)
     return str_find(haystack, needle, from or 1, true)
 end
@@ -98,6 +99,7 @@ end
 -- this method should be used with caution
 -- it will remove the spaces at the beginning of each line
 -- and remove the spaces after `,` character
+-- 删除每行开头的空格和`,`后的空格
 function _M.compress_script(s)
     s = ngx.re.gsub(s, [[^\s+]], "", "mjo")
     s = ngx.re.gsub(s, [[,\s+]], ",", "mjo")
@@ -117,6 +119,7 @@ end
 function _M.decode_args(args)
     -- use 0 to avoid truncated result and keep the behavior as the
     -- same as other platforms
+    -- ngx.decode_args
     return ngx_decode_args(args, 0)
 end
 
@@ -130,6 +133,7 @@ end
 -- @usage
 -- local str = core.string.encode_args({a=1, b=2}) -- "a=1&b=2"
 function _M.encode_args(args)
+    -- ngx.encode_args
     return ngx_encode_args(args)
 end
 

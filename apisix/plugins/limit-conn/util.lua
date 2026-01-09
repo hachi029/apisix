@@ -21,9 +21,11 @@ local floor             = math.floor
 local _M = {version = 0.3}
 
 
+-- 对key +1 , 判断是否超出max 、或超出 max+burst
 function _M.incoming(self, red, key, commit)
     local max = self.max
     self.committed = false
+    -- key为limit_conn:123route397
     key = "limit_conn" .. ":" .. key
 
     local conn, err
@@ -33,6 +35,7 @@ function _M.incoming(self, red, key, commit)
             return nil, err
         end
 
+        -- max为最大并发连接
         if conn > max + self.burst then
             conn, err = red:incrby(key, -1)
             if not conn then

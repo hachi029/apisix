@@ -380,6 +380,7 @@ local function send_to_kafka(log_message)
 
     local broker_config = {}
     broker_config["request_timeout"] = config.timeout * 1000
+    -- producer_type: "async", "sync"
     broker_config["producer_type"] = config.kafka.producer_type
     broker_config["required_acks"] = config.kafka.required_acks
     broker_config["refresh_interval"] = config.kafka.meta_refresh_interval * 1000

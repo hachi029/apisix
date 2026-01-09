@@ -489,6 +489,7 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
         -- ignore res with revision smaller then self.prev_index
         if tonumber(res.result.header.revision) > self.prev_index then
             local res2
+            -- {"result":{"header":{"cluster_id":"14841639068965178418","raft_term":"12","member_id":"10276657743932975437","revision":"385"},"events":[{"kv":{"value":{"plugins":{"public-api":{}},"id":"1","uri":"/apisix/batch-requests","update_time":1764225975,"create_time":1764157231},"version":"16","key":"/apisix/routes/1","create_revision":"68","mod_revision":"385"}}]}}
             for _, evt in ipairs(res.result.events) do
                 -- is evt.kv.key start_with key
                 -- sub watch 找到自己感兴趣的updates  key为 "/apisix/routes/1"
@@ -497,12 +498,14 @@ local function http_waitdir(self, etcd_cli, key, modified_index, timeout)
                         res2 = tablex.deepcopy(res)
                         table.clear(res2.result.events)
                     end
+                    -- evt: {"kv":{"value":{"plugins":{"public-api":{}},"id":"1","uri":"/apisix/batch-requests","update_time":1764225975,"create_time":1764157231},"version":"16","key":"/apisix/routes/1","create_revision":"68","mod_revision":"385"}}
                     insert_tab(res2.result.events, evt)
                 end
             end
 
             -- 如果有更新数据，则返回
             if res2 then
+                -- 返回本次获取到的变更数据
                 return res2
             end
         end
@@ -565,6 +568,8 @@ local function waitdir(self)
         return nil, err
     end
 
+    -- 此处说明self.key 下有配置变更
+    -- v3res 格式化为 v2res
     return etcd_apisix.watch_format(res)
 end
 
@@ -607,7 +612,7 @@ local function load_full_data(self, dir_res, headers)
 
     if self.single_item then
         self.values = new_tab(1, 0)
-        -- values_hash， 对于/apisix/routes/getting-started-ip, key 为 getting-started-ip
+        -- values_hash， 对于/apisix/routes/getting-started-ip, key 为 getting-started-ip, value为在self.values数组中的index
         self.values_hash = new_tab(0, 1)
 
         local item = dir_res
@@ -775,6 +780,7 @@ local function sync_data(self)
     end
 
     local dir_res, err = waitdir(self)
+    -- 返回说明监听到了self.key下的配置变更
     log.info("waitdir key: ", self.key, " prev_index: ", self.prev_index + 1)
     if is_bulk_operation(dir_res) then
         log.info("etcd events sent in bulk")
@@ -929,7 +935,7 @@ local function sync_data(self)
 
         -- /plugins' filter need to known self.values when it is called
         -- so the filter should be called after self.values set.
-        -- 回调自定义filter
+        -- 回调自定义filter， 此时self.values已更新
         if self.filter then
             self.filter(res)
         end

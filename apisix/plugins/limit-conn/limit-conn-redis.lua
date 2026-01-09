@@ -68,6 +68,7 @@ local function leaving_thread(premature, self, key, req_latency)
 end
 
 
+-- 在log_by_lua阶段执行
 function _M.leaving(self, key, req_latency)
     -- log_by_lua can't use cosocket
     local ok, err = ngx_timer_at(0, leaving_thread, self, key, req_latency)

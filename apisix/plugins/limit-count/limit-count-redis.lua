@@ -29,6 +29,7 @@ local mt = {
 }
 
 
+-- argv: limit, window, cost; keys: key
 local script = core.string.compress_script([=[
     assert(tonumber(ARGV[3]) >= 1, "cost must be at least 1")
     local ttl = redis.call('ttl', KEYS[1])
@@ -52,6 +53,7 @@ function _M.new(plugin_name, limit, window, conf)
     return setmetatable(self, mt)
 end
 
+-- 固定窗口算法实现。
 function _M.incoming(self, key, cost)
     local conf = self.conf
     local red, err = redis.new(conf)
@@ -62,18 +64,25 @@ function _M.incoming(self, key, cost)
     local limit = self.limit
     local window = self.window
     local res
+    -- plugin-limit-count
     key = self.plugin_name .. tostring(key)
 
+    -- key:  plugin-limit-countroutelimit-count-route:1734301207:123
     local ttl = 0
+    -- 1个key. args: limit, window, cost
     res, err = red:eval(script, 1, key, limit, window, cost or 1)
 
     if err then
         return nil, err, ttl
     end
 
+    -- 窗口内剩余的count数
     local remaining = res[1]
+    -- 剩余ttl
     ttl = res[2]
 
+    -- https://github.com/openresty/lua-resty-redis/blob/master/README.markdown#set_keepalive
+    -- Puts the current Redis connection immediately into the ngx_lua cosocket connection pool.
     local ok, err = red:set_keepalive(10000, 100)
     if not ok then
         return nil, err, ttl

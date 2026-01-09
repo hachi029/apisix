@@ -273,7 +273,7 @@ _M.deep_eq = deep_eq
 
 
 -- pick takes the given attributes out of object
--- 将obj的部分属性attrs组成一个新的table, 返回
+-- 将obj与attrs重合的key组成一个新的table, value为attrs[key],返回
 function _M.pick(obj, attrs)
     local data = {}
     for k, v in pairs(obj) do
