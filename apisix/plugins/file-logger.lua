@@ -123,6 +123,7 @@ if is_apisix_or then
         local last_reopen_time = process.get_last_reopen_ms()
 
         -- lru_cache
+        --  key: 缓存key; version: 缓存版本; create_obj_fun: 如果缓存不存在，创建方法; ... create_obj_fun参数
         local handler, err = path_to_file(conf.path, 0, open_file_handler, conf, {})
         if not handler then
             return nil, err
