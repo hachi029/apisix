@@ -149,6 +149,8 @@ function _M.http_init_worker()
     require("apisix.admin.init").init_worker()
 
     -- 7. 启动background timer。仅特权进程启用
+    --admin-api 初始化，admin-api监听在专门的一个端口
+    require("apisix.admin.init").init_worker()
     require("apisix.timers").init_worker()
 
     -- 8. 调试模式：
