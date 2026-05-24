@@ -16,6 +16,7 @@
 --
 local redis     = require("apisix.utils.redis")
 local core = require("apisix.core")
+local to_hex = require("resty.string").to_hex
 local assert = assert
 local setmetatable = setmetatable
 local tostring = tostring
@@ -39,6 +40,7 @@ local script = core.string.compress_script([=[
     end
     return {redis.call('incrby', KEYS[1], 0 - ARGV[3]), ttl}
 ]=])
+local script_sha = to_hex(ngx.sha1_bin(script))
 
 
 function _M.new(plugin_name, limit, window, conf)
@@ -69,8 +71,11 @@ function _M.incoming(self, key, cost)
 
     -- key:  plugin-limit-countroutelimit-count-route:1734301207:123
     local ttl = 0
-    -- 1个key. args: limit, window, cost
-    res, err = red:eval(script, 1, key, limit, window, cost or 1)
+    res, err = red:evalsha(script_sha, 1, key, limit, window, cost or 1)
+    if err and core.string.has_prefix(err, "NOSCRIPT") then
+        core.log.warn("redis evalsha failed: ", err, ". Falling back to eval")
+        res, err = red:eval(script, 1, key, limit, window, cost or 1)
+    end
 
     if err then
         return nil, err, ttl
@@ -81,9 +86,7 @@ function _M.incoming(self, key, cost)
     -- 剩余ttl
     ttl = res[2]
 
-    -- https://github.com/openresty/lua-resty-redis/blob/master/README.markdown#set_keepalive
-    -- Puts the current Redis connection immediately into the ngx_lua cosocket connection pool.
-    local ok, err = red:set_keepalive(10000, 100)
+    local ok, err = red:set_keepalive(conf.redis_keepalive_timeout, conf.redis_keepalive_pool)
     if not ok then
         return nil, err, ttl
     end

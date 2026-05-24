@@ -27,6 +27,14 @@ do_install() {
     ./ci/linux-install-openresty.sh
     ./utils/linux-install-luarocks.sh
     ./ci/linux-install-etcd-client.sh
+
+    # install nodejs
+    install_nodejs
+
+    # install common jest test suite
+    pushd t
+    pnpm install
+    popd
 }
 
 script() {
@@ -34,6 +42,10 @@ script() {
     openresty -V
 
     sudo rm -rf /usr/local/share/lua/5.1/apisix
+
+    export RUSTUP_HOME="${RUSTUP_HOME:-/usr/local/rustup}"
+    export CARGO_HOME="${CARGO_HOME:-/usr/local/cargo}"
+    export PATH="${CARGO_HOME}/bin:${PATH}"
 
     # install APISIX with local version
     luarocks install apisix-master-0.rockspec --only-deps > build.log 2>&1 || (cat build.log && exit 1)
@@ -72,6 +84,8 @@ script() {
     ulimit -n -H
 
     for f in ./t/cli/test_*.sh; do
+        # skip docker test - runs in separate container
+        [[ "$f" == "./t/cli/test_standalone_docker.sh" ]] && continue
         PATH="$PATH" "$f"
     done
 }

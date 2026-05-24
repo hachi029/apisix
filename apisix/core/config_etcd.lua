@@ -49,7 +49,6 @@ local string       = string
 local error        = error
 local pairs        = pairs
 local next         = next
-local assert       = assert
 local rand         = math.random
 local constants    = require("apisix.constants")
 local health_check = require("resty.etcd.health_check")
@@ -162,7 +161,11 @@ local function do_run_watch(premature)
             local _, res = next(loaded_configuration)
             if res then
                 rev = tonumber(res.headers["X-Etcd-Index"])
-                assert(rev > 0, 'invalid res.headers["X-Etcd-Index"]')
+                if not rev or rev <= 0 then
+                    log.warn("invalid or missing X-Etcd-Index header, ",
+                             "will fetch revision from etcd directly")
+                    rev = 0
+                end
             end
         end
 
@@ -174,13 +177,22 @@ local function do_run_watch(premature)
                 if not res then
                     log.error("etcd get: ", err)
                     ngx_sleep(3)
+                elseif not (res.body and res.body.header and res.body.header.revision) then
+                    log.error("etcd response missing header.revision")
+                    ngx_sleep(3)
                 else
                     -- https://www.cnblogs.com/FengZeng666/p/16156407.html
                     -- Revision;CreateRevision: key被创建时的Revision; Version: 作用域为 key, 这个key每次修改都会自增
                     -- revision 每次变更此值+1。 作用域为集群，逻辑时间戳，全局单调递增，任何 key 的增删改都会使其自增
                     -- res.body: {"header":{"raft_term":"12","cluster_id":"14841639068965178418","revision":"380","member_id":"10276657743932975437"}}
                     rev = tonumber(res.body.header.revision)
-                    break
+                    if not rev then
+                        log.error("etcd response has invalid header.revision: ",
+                                  tostring(res.body.header.revision))
+                        ngx_sleep(3)
+                    else
+                        break
+                    end
                 end
             end
         end

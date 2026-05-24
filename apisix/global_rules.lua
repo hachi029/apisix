@@ -15,8 +15,10 @@
 -- limitations under the License.
 --
 
-local core    = require("apisix.core")
+local core           = require("apisix.core")
 local plugin_checker = require("apisix.plugin").plugin_checker
+local plugin         = require("apisix.plugin")
+
 local error = error
 
 
@@ -25,6 +27,15 @@ local _M = {}
 -- 为 core.config.new("/global_rules",opts)
 local global_rules
 
+
+local function filter(global_rule)
+    if not global_rule.value or not global_rule.value.plugins then
+        return
+    end
+    plugin.set_plugins_meta_parent(global_rule.value.plugins, global_rule)
+end
+
+
 function _M.init_worker()
     local err
     global_rules, err = core.config.new("/global_rules", {
@@ -32,6 +43,7 @@ function _M.init_worker()
         item_schema = core.schema.global_rule,
         -- checker, global_rules本质就是plugin
         checker = plugin_checker,
+        filter = filter
     })
     if not global_rules then
         error("failed to create etcd instance for fetching /global_rules : "

@@ -28,11 +28,8 @@ local tonumber = tonumber
 
 local _M = {}
 
-local tmp = {}
--- 多个变量生成一个字符串
--- data如 ["$host", "$request_uri"] -> "$host$request_uri"
 function _M.generate_complex_value(data, ctx)
-    core.table.clear(tmp)
+    local tmp = core.tablepool.fetch("proxy_cache_complex_value", #data, 0)
 
     core.log.info("proxy-cache complex value: ", core.json.delay_encode(data))
     -- 遍历每个变量
@@ -48,8 +45,9 @@ function _M.generate_complex_value(data, ctx)
         end
     end
 
-    -- 将每个变量值连接成一个字符串
-    return tab_concat(tmp, "")
+    local result = tab_concat(tmp, "")
+    core.tablepool.release("proxy_cache_complex_value", tmp)
+    return result
 end
 
 

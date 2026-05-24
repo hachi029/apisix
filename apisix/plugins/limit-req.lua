@@ -20,7 +20,9 @@ local core                              = require("apisix.core")
 local redis_schema                      = require("apisix.utils.redis-schema")
 local policy_to_additional_properties   = redis_schema.schema
 local plugin_name                       = "limit-req"
-local sleep = core.sleep
+local sleep                             = core.sleep
+local apisix_plugin                     = require("apisix.plugin")
+local error                             = error
 
 local redis_single_new
 local redis_cluster_new
@@ -124,6 +126,16 @@ local function create_limit_obj(conf)
 end
 
 
+local function gen_limit_key(conf, ctx, key)
+    local parent = conf._meta and conf._meta.parent
+    if not parent or not parent.resource_key then
+        error("failed to generate key invalid parent: " .. core.json.encode(parent))
+    end
+
+    return parent.resource_key .. ':' .. apisix_plugin.conf_version(conf) .. ':' .. key
+end
+
+
 function _M.access(conf, ctx)
     -- 获取limiter对象
     local lim, err = core.lrucache.plugin_ctx(lrucache, ctx, nil,
@@ -162,8 +174,7 @@ function _M.access(conf, ctx)
         key = ctx.var["remote_addr"]
     end
 
-    -- key: remote_addr; conf_type: route; conf_version: conf_modify_index
-    key = key .. ctx.conf_type .. ctx.conf_version
+    key = gen_limit_key(conf, ctx, key)
     core.log.info("limit key: ", key)
 
     -- 如果基于redis, 需要4次redis get/set操作

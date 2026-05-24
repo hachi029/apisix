@@ -21,6 +21,9 @@ ARG CODE_PATH
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ENV_INST_LUADIR=/usr/local/apisix
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 COPY ${CODE_PATH} /apisix
 
@@ -32,7 +35,12 @@ RUN set -x \
         make \
         git  \
         sudo \
+        ca-certificates \
+        curl \
+        gcc \
+        g++ \
         libyaml-dev \
+    && bash -c '. ./utils/install-rust-toolchain.sh && install_rust_toolchain' \
     && ls -al \
     && make deps \
     && mkdir -p ${ENV_INST_LUADIR} \
@@ -43,7 +51,6 @@ FROM debian:bullseye-slim
 
 ARG ENTRYPOINT_PATH=./docker-entrypoint.sh
 ARG INSTALL_BROTLI=./install-brotli.sh
-ARG CHECK_STANDALONE_CONFIG=./check_standalone_config.sh
 
 # Install the runtime libyaml package
 RUN apt-get -y update --fix-missing \
@@ -58,7 +65,9 @@ COPY --chown=nobody:root ui/ /usr/local/apisix/ui/
 
 COPY ${INSTALL_BROTLI} /install-brotli.sh
 RUN chmod +x /install-brotli.sh \
-    && cd / && ./install-brotli.sh && rm -rf /install-brotli.sh
+    && cd / && ./install-brotli.sh && rm -rf /install-brotli.sh \
+    && chgrp -R 0 /usr/local/apisix \
+    && chmod -R g=u /usr/local/apisix
 
 ENV PATH=$PATH:/usr/local/openresty/luajit/bin:/usr/local/openresty/nginx/sbin:/usr/local/openresty/bin
 
@@ -70,8 +79,7 @@ RUN ln -sf /dev/stdout /usr/local/apisix/logs/access.log \
 EXPOSE 9080 9443
 
 COPY ${ENTRYPOINT_PATH} /docker-entrypoint.sh
-COPY ${CHECK_STANDALONE_CONFIG} /check_standalone_config.sh
-RUN chmod +x /docker-entrypoint.sh /check_standalone_config.sh
+RUN chmod +x /docker-entrypoint.sh
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
 

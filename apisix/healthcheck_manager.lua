@@ -26,7 +26,6 @@ local resource = require("apisix.resource")
 local upstream_utils = require("apisix.utils.upstream")
 -- https://github.com/Kong/lua-resty-healthcheck
 local healthcheck
-local events = require("apisix.events")
 local tab_clone = core.table.clone
 local timer_every = ngx.timer.every
 local jp = require("jsonpath")
@@ -40,10 +39,6 @@ local waiting_pool = {}
 
 local DELAYED_CLEAR_TIMEOUT = 10
 local healthcheck_shdict_name = "upstream-healthcheck"
-local is_http = ngx.config.subsystem == "http"
-if not is_http then
-    healthcheck_shdict_name = healthcheck_shdict_name .. "-" .. ngx.config.subsystem
-end
 
 
 -- 获取健康检查器名称
@@ -77,7 +72,7 @@ local function create_checker(up_conf)
         -- the name of the lua_shared_dict specified in the Nginx configuration to use
         shm_name = healthcheck_shdict_name,
         checks = up_conf.checks,
-        events_module = events:get_healthcheck_events_module(),
+        events_module = "resty.events",
     })
 
     if not checker then

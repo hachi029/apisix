@@ -19,6 +19,11 @@
 
 set -ex
 
+_APISIX_UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=utils/install-rust-toolchain.sh
+. "${_APISIX_UTILS_DIR}/install-rust-toolchain.sh"
+unset _APISIX_UTILS_DIR
+
 function detect_aur_helper() {
     if [[ $(command -v yay) ]]; then
         AUR_HELPER=yay
@@ -33,7 +38,8 @@ function detect_aur_helper() {
 function install_dependencies_with_aur() {
     detect_aur_helper
     $AUR_HELPER -S openresty --noconfirm
-    sudo pacman -S openssl --noconfirm
+    sudo pacman -S openssl base-devel git --noconfirm
+    install_rust_toolchain
 
     export OPENRESTY_PREFIX=/opt/openresty
 
@@ -55,8 +61,9 @@ function install_dependencies_with_yum() {
     fi
     sudo yum install -y  \
         gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed cpanminus patch libyaml-devel \
-        perl perl-devel pcre pcre-devel openldap-devel \
+        perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel \
         openresty-zlib-devel openresty-pcre-devel
+    install_rust_toolchain
 }
 
 # Install dependencies on ubuntu and debian
@@ -78,7 +85,8 @@ function install_dependencies_with_apt() {
     sudo apt-get update
 
     # install some compilation tools
-    sudo apt-get install -y curl make gcc g++ cpanminus libpcre3 libpcre3-dev libyaml-dev unzip openresty-zlib-dev openresty-pcre-dev
+    sudo apt-get install -y curl make gcc g++ cpanminus libpcre3 libpcre3-dev libpcre2-dev libyaml-dev unzip openresty-zlib-dev openresty-pcre-dev
+    install_rust_toolchain
 }
 
 # Identify the different distributions and call the corresponding function

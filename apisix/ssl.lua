@@ -131,7 +131,7 @@ end
 local function encrypt(aes_128_cbc_with_iv, origin)
     local encrypted = aes_128_cbc_with_iv:encrypt(origin)
     if encrypted == nil then
-        core.log.error("failed to encrypt key[", origin, "] ")
+        core.log.error("failed to encrypt key")
         return origin
     end
 
@@ -173,8 +173,8 @@ local function aes_decrypt_pkey(origin, field)
 
     local decoded_key = ngx_decode_base64(origin)
     if not decoded_key then
-        core.log.error("base64 decode ssl key failed. key[", origin, "] ")
-        return nil
+        core.log.error("base64 decode ssl key failed")
+        return nil, "base64 decode ssl key failed"
     end
 
     for _, aes_128_cbc_with_iv in ipairs(aes_128_cbc_with_iv_tbl) do
