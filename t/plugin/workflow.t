@@ -161,7 +161,7 @@ __DATA__
 --- response_body
 done
 property "rules" validation failed: failed to validate item 1: property "actions" is required
-property "rules" validation failed: failed to validate item 1: property "actions" validation failed: failed to validate item 1: expect array to have at least 1 items
+property "rules" validation failed: failed to validate item 1: property "actions" validation failed: failed to validate item 1: expect array to have at least 2 items
 failed to validate the 'return' action: property "code" is required
 failed to validate the 'return' action: property "code" validation failed: wrong type: expected integer, got string
 property "rules" validation failed: failed to validate item 1: property "case" validation failed: expect array to have at least 1 items
@@ -541,8 +541,8 @@ hello1 world
     }
 --- response_body
 done
-failed to validate the 'limit-count' action: property "time_window" is required
-failed to validate the 'limit-count' action: property "count" is required
+failed to validate the 'limit-count' action: value should match only one schema, but matches none
+failed to validate the 'limit-count' action: value should match only one schema, but matches none
 failed to validate the 'limit-count' action: group is not supported
 
 

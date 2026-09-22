@@ -16,12 +16,35 @@
 # limitations under the License.
 #
 
+# A broker that is not registered in ZooKeeper yet rejects topic creation with
+# "Replication factor: 1 larger than available brokers: 0". The failure used to be
+# silent, and the topic was then auto-created with the broker's default partition
+# count, which quietly broke tests that expect a specific partition layout.
+create_kafka_topic() {
+    local container="$1"
+    local zookeeper="$2"
+    local partitions="$3"
+    local topic="$4"
+
+    for _ in $(seq 30); do
+        if docker exec -i "$container" /opt/bitnami/kafka/bin/kafka-topics.sh --create \
+            --zookeeper "$zookeeper" --replication-factor 1 \
+            --partitions "$partitions" --topic "$topic"; then
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo "failed to create kafka topic $topic on $container"
+    exit 1
+}
+
 after() {
-    docker exec -i apache-apisix-kafka-server1-1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server1:2181 --replication-factor 1 --partitions 1 --topic test2
-    docker exec -i apache-apisix-kafka-server1-1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server1:2181 --replication-factor 1 --partitions 3 --topic test3
-    docker exec -i apache-apisix-kafka-server2-1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server2:2181 --replication-factor 1 --partitions 1 --topic test4
-    docker exec -i apache-apisix-kafka-server3-scram-1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server3:2181 --replication-factor 1 --partitions 1 --topic test-scram-256
-    docker exec -i apache-apisix-kafka-server3-scram-1 /opt/bitnami/kafka/bin/kafka-topics.sh --create --zookeeper zookeeper-server3:2181 --replication-factor 1 --partitions 1 --topic test-scram-512
+    create_kafka_topic apache-apisix-kafka-server1-1 zookeeper-server1:2181 1 test2
+    create_kafka_topic apache-apisix-kafka-server1-1 zookeeper-server1:2181 3 test3
+    create_kafka_topic apache-apisix-kafka-server2-1 zookeeper-server2:2181 1 test4
+    create_kafka_topic apache-apisix-kafka-server3-scram-1 zookeeper-server3:2181 1 test-scram-256
+    create_kafka_topic apache-apisix-kafka-server3-scram-1 zookeeper-server3:2181 1 test-scram-512
     # Create user with SCRAM-SHA-512
     docker exec apache-apisix-kafka-server3-scram-1 /opt/bitnami/kafka/bin/kafka-configs.sh \
         --zookeeper zookeeper-server3:2181 \
@@ -49,7 +72,17 @@ after() {
     docker exec -i rmqnamesrv /home/rocketmq/rocketmq-4.6.0/bin/mqadmin updateTopic -n rocketmq_namesrv:9876 -t test4 -c DefaultCluster
 
     # wait for keycloak ready
-    bash -c 'while true; do curl -s localhost:8080 &>/dev/null; ret=$?; [[ $ret -eq 0 ]] && break; sleep 3; done'
+    for i in $(seq 1 60); do
+        if curl -sf localhost:8080 >/dev/null 2>&1; then
+            break
+        fi
+        if [ "$i" -eq 60 ]; then
+            echo "ERROR: keycloak (apisix_keycloak_new) failed to become ready"
+            docker logs apisix_keycloak_new 2>&1 || true
+            exit 1
+        fi
+        sleep 3
+    done
 
     # install jq
     wget https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -O jq
@@ -61,6 +94,21 @@ after() {
     docker exec apisix_keycloak bash /tmp/kcadm_configure_university.sh
     docker exec apisix_keycloak bash /tmp/kcadm_configure_basic.sh
 
+    # wait for saml keycloak ready and configure it
+    for i in $(seq 1 60); do
+        if curl -sf localhost:8087 >/dev/null 2>&1; then
+            break
+        fi
+        if [ "$i" -eq 60 ]; then
+            echo "ERROR: keycloak (apisix_keycloak_saml) failed to become ready"
+            docker logs apisix_keycloak_saml 2>&1 || true
+            exit 1
+        fi
+        sleep 3
+    done
+    docker cp jq apisix_keycloak_saml:/usr/bin/
+    docker exec apisix_keycloak_saml bash /tmp/kcadm_configure_saml.sh
+
     # configure clickhouse
     echo 'CREATE TABLE default.test (`host` String, `client_ip` String, `route_id` String, `service_id` String, `@timestamp` String, PRIMARY KEY(`@timestamp`)) ENGINE = MergeTree()' | curl 'http://localhost:8123/' --data-binary @-
     echo 'CREATE TABLE default.test (`host` String, `client_ip` String, `route_id` String, `service_id` String, `@timestamp` String, PRIMARY KEY(`@timestamp`)) ENGINE = MergeTree()' | curl 'http://localhost:8124/' --data-binary @-
@@ -69,6 +117,9 @@ after() {
 before() {
     # download keycloak cas provider
     sudo wget -q https://github.com/jacekkow/keycloak-protocol-cas/releases/download/18.0.2/keycloak-protocol-cas-18.0.2.jar -O /opt/keycloak-protocol-cas-18.0.2.jar
+
+    # generating SSL certificates for Kafka
+    sudo keytool -genkeypair -keyalg RSA -dname "CN=127.0.0.1" -alias 127.0.0.1 -keystore ./ci/pod/kafka/kafka-server/selfsigned.jks -validity 365 -keysize 2048 -storepass changeit
 }
 
 case $1 in

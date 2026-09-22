@@ -16,11 +16,12 @@
 --
 local core = require("apisix.core")
 local ipmatcher = require("resty.ipmatcher")
-local ngx_now = ngx.now
 local ipairs = ipairs
 local type = type
 local tostring = tostring
-
+local resource = require("apisix.resource")
+local tracer    = require("apisix.tracer")
+local ngx = ngx
 
 local _M = {}
 
@@ -55,7 +56,15 @@ local function compare_upstream_node(up_conf, new_t)
         -- if original_nodes is set, it means that the upstream nodes
         -- are changed by `fill_node_info`, so we need to compare the new nodes with the
         -- original nodes.
-        old_t = up_conf.original_nodes
+        -- There is a catch, though: when service discovery or DNS resolution
+        -- fail to resolve an upstream, `nodes` is cleared but `fill_node_info`
+        -- is never called, so `original_nodes` is not updated.
+        -- Therefore `original_nodes` should only be considered valid if `nodes`
+        -- is not empty.
+        -- See https://github.com/apache/apisix/issues/12973
+        if #up_conf.nodes > 0 then
+            old_t = up_conf.original_nodes
+        end
     end
 
     if #new_t ~= #old_t then
@@ -82,6 +91,7 @@ _M.compare_upstream_node = compare_upstream_node
 -- 遍历nodes, 如果某个node是域名，则解析域名为IP。如果route.hash_domain, 则route每次被匹配到都会调用此方法
 -- 封装为new_nodes并返回
 local function parse_domain_for_nodes(nodes)
+    local span = tracer.start(ngx.ctx, "resolve_dns", tracer.kind.internal)
     local new_nodes = core.table.new(#nodes, 0)
     for _, node in ipairs(nodes) do
         local host = node.host
@@ -104,6 +114,7 @@ local function parse_domain_for_nodes(nodes)
             core.table.insert(new_nodes, node)
         end
     end
+    span:finish(ngx.ctx)
     return new_nodes
 end
 _M.parse_domain_for_nodes = parse_domain_for_nodes
@@ -121,11 +132,15 @@ function _M.parse_domain_in_up(up)
         return up
     end
 
-    if not up.orig_modifiedIndex then
-        up.orig_modifiedIndex = up.modifiedIndex
+    local nodes_ver = resource.get_nodes_ver(up.value.resource_key)
+    if not nodes_ver then
+        nodes_ver = 0
     end
-    up.modifiedIndex = up.orig_modifiedIndex .. "#" .. ngx_now()
+    nodes_ver = nodes_ver + 1
+    up.value._nodes_ver = nodes_ver
     up.value.nodes = new_nodes
+    resource.set_nodes_ver_and_nodes(up.value.resource_key, nodes_ver, new_nodes)
+
     core.log.info("resolve upstream which contain domain: ",
                   core.json.delay_encode(up, true))
     return up

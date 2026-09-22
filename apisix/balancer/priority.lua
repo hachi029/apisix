@@ -35,7 +35,9 @@ function _M.new(up_nodes, upstream, picker_mod)
 
     local pickers = core.table.new(#priority_index, 0)
     for i, priority in ipairs(priority_index) do
-        local picker, err = picker_mod.new(up_nodes[priority], upstream)   --每个优先级创建一个负载均衡器
+        -- the priority is part of the picker's identity: node sets of different
+        -- priorities are disjoint and must not share balancing state
+        local picker, err = picker_mod.new(up_nodes[priority], upstream, priority)  --每个优先级创建一个负载均衡器
         if not picker then
             return nil, "failed to create picker with priority " .. priority .. ": " .. err
         end

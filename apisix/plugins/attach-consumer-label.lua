@@ -47,20 +47,21 @@ function _M.check_schema(conf)
 end
 
 function _M.before_proxy(conf, ctx)
-    -- check if the consumer is exists in the context
-    if not ctx.consumer then        --未经过认证
+    local labels = ctx.consumer and ctx.consumer.labels      --自定义标签
+
+    -- no labels to map: just drop client-supplied copies of the configured headers
+    if not labels then
+        for header in pairs(conf.headers) do
+            core.request.set_header(ctx, header, nil)
+        end
         return
     end
 
-    local labels = ctx.consumer.labels      --自定义标签
     core.log.info("consumer username: ", ctx.consumer.username, " labels: ",
             core.json.delay_encode(labels))
-    if not labels then
-        return
-    end
 
     for header, label_key in pairs(conf.headers) do     --设置自定义标签
-        -- remove leading $ character
+        -- remove leading $ character, set value (nil clears any client-supplied copy)
         local label_value = labels[label_key:sub(2)]
         core.request.set_header(ctx, header, label_value)
     end

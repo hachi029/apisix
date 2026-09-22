@@ -18,6 +18,7 @@ local core     = require("apisix.core")
 local consumer_mod = require("apisix.consumer")
 local plugin_name = "key-auth"
 local schema_def = require("apisix.schema_def")
+local auth_utils = require("apisix.utils.auth")
 
 local schema = {
     type = "object",
@@ -30,6 +31,7 @@ local schema = {
             type = "string",
             default = "apikey",
         },
+        realm = schema_def.get_realm_schema("key"),
         hide_credentials = {
             type = "boolean",
             default = false,
@@ -85,7 +87,12 @@ local function find_consumer(ctx, conf)
     -- consumer 包含了该consumer所有auth配置
     local consumer, consumer_conf, err = consumer_mod.find_consumer(plugin_name, "key", key)
     if not consumer then
-        core.log.warn("failed to find consumer: ", err or "invalid api key")
+        err = "failed to find consumer: " .. (err or "invalid api key")
+        -- surface the real reason to the multi-auth orchestrator
+        if auth_utils.is_running_under_multi_auth(ctx) then
+            return nil, nil, err
+        end
+        core.log.warn(err)
         return nil, nil, "Invalid API key in request"
     end
 
@@ -107,10 +114,31 @@ function _M.rewrite(conf, ctx)
     local consumer, consumer_conf, err = find_consumer(ctx, conf)
     if not consumer then
         if not conf.anonymous_consumer then
+            core.response.set_header("WWW-Authenticate", "apikey realm=\"" .. conf.realm .. "\"")
             return 401, { message = err}
+        end
+        -- Strip credentials before falling back to the anonymous consumer when
+        -- hide_credentials is enabled. find_consumer() only strips on the
+        -- successful-auth path, so without this an invalid credential would be
+        -- forwarded upstream during anonymous fallback. A request may carry the
+        -- credential in both the header and the query string, so clean up both.
+        if conf.hide_credentials then
+            if core.request.header(ctx, conf.header) then
+                core.request.set_header(ctx, conf.header, nil)
+            end
+            local args = core.request.get_uri_args(ctx) or {}
+            if args[conf.query] then
+                args[conf.query] = nil
+                core.request.set_uri_args(ctx, args)
+            end
         end
         consumer, consumer_conf, err = consumer_mod.get_anonymous_consumer(conf.anonymous_consumer)
         if not consumer then
+            core.response.set_header("WWW-Authenticate", "apikey realm=\"" .. conf.realm .. "\"")
+            -- surface the real reason to the multi-auth orchestrator
+            if auth_utils.is_running_under_multi_auth(ctx) then
+                return 401, err
+            end
             err = "key-auth failed to authenticate the request, code: 401. error: " .. err
             core.log.error(err)
             return 401, { message = "Invalid user authorization"}

@@ -26,6 +26,7 @@ require("jit.opt").start("minstitch=2", "maxtrace=4000",
                          "maxmcode=4000", "maxirconst=1000")
 
 require("apisix.patch").patch()
+local ws_proxy        = require("resty.websocket.proxy")
 local core            = require("apisix.core")
 local plugin          = require("apisix.plugin")
 local plugin_config   = require("apisix.plugin_config")
@@ -47,6 +48,9 @@ local debug           = require("apisix.debug")
 local pubsub_kafka    = require("apisix.pubsub.kafka")
 local resource        = require("apisix.resource")
 local trusted_addresses_util = require("apisix.utils.trusted-addresses")
+local tracer          = require("apisix.tracer")
+
+local discovery = require("apisix.discovery.init").discovery
 local ngx             = ngx
 local get_method      = ngx.req.get_method
 local ngx_exit        = ngx.exit
@@ -55,8 +59,13 @@ local ipairs          = ipairs
 local ngx_now         = ngx.now
 local ngx_var         = ngx.var
 local re_split        = require("ngx.re").split
+local re_gsub         = ngx.re.gsub
 local str_byte        = string.byte
 local str_sub         = string.sub
+local str_char        = string.char
+local str_format      = string.format
+local str_find        = string.find
+local str_lower       = string.lower
 local tonumber        = tonumber
 local type            = type
 local pairs           = pairs
@@ -95,6 +104,7 @@ function _M.http_init(args)
     --自动生成admin-key和conf/apisix.uid
     core.id.init()
     core.env.init()
+    require("apisix.slow_start").init()
 
     local process = require("ngx.process")
     local ok, err = process.enable_privileged_agent()
@@ -124,11 +134,16 @@ function _M.http_init_worker()
     -- for testing only
     core.log.info("random test in [1, 10000]: ", math.random(1, 10000))
 
+    -- Re-read the environment in the worker phase: nginx applies
+    -- `env NAME=VALUE;` directives to `environ` at worker start (in
+    -- ngx_set_environment), after the init phase. This rebuild ensures
+    -- directive-assigned values are captured with exact keys. See #13055.
+    core.env.init()
+
     require("apisix.events").init_worker()
 
     core.lrucache.init_worker()
 
-    local discovery = require("apisix.discovery.init").discovery
     if discovery and discovery.init_worker then
         discovery.init_worker()
     end
@@ -175,6 +190,12 @@ function _M.http_init_worker()
     plugin.init_prometheus()
 
     trusted_addresses_util.init_worker()
+
+    local process = require("ngx.process")
+    if process.type() == "privileged agent" then
+        -- start the redis cluster node health checker timer
+        require("resty.rediscluster").init()
+    end
 end
 
 
@@ -211,6 +232,9 @@ function _M.ssl_client_hello_phase()
     local ngx_ctx = ngx.ctx
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
+    api_ctx.ngx_ctx = ngx_ctx
+
+    local span = tracer.start(ngx_ctx, "ssl_client_hello_phase", tracer.kind.server)
 
     local ok, err = router.router_ssl.match_and_set(api_ctx, true, sni)
 
@@ -224,18 +248,26 @@ function _M.ssl_client_hello_phase()
             core.log.error("failed to fetch ssl config: ", err)
         end
         core.log.error("failed to match any SSL certificate by SNI: ", sni)
+        span:set_status(tracer.status.ERROR, "no matched SSL")
+        span:finish(ngx_ctx)
+        tracer.release(ngx_ctx)
         ngx_exit(-1)
     end
 
     ok, err = apisix_ssl.set_protocols_by_clienthello(ngx_ctx.matched_ssl.value.ssl_protocols)
     if not ok then
         core.log.error("failed to set ssl protocols: ", err)
+        span:set_status(tracer.status.ERROR, "failed set protocols")
+        span:finish(ngx_ctx)
+        tracer.release(ngx_ctx)
         ngx_exit(-1)
     end
 
     -- in stream subsystem, ngx.ssl.server_name() return hostname of ssl session in preread phase,
     -- so that we can't get real SNI without recording it in ngx.ctx during client_hello phase
     ngx.ctx.client_hello_sni = sni
+    span:finish(ngx_ctx)
+    tracer.release(ngx_ctx)
 end
 
 
@@ -263,7 +295,6 @@ local function parse_domain_in_route(route)
         return nil, err
     end
 
-    local up_conf = route.dns_value and route.dns_value.upstream
     -- 比较new_nodes 与up_conf是否相同，比较字段 包括host", "port", "weight", "priority", "metadata"
     local up_conf = route.value.upstream
     local ok = upstream_util.compare_upstream_node(up_conf, new_nodes)
@@ -290,6 +321,23 @@ local function parse_domain_in_route(route)
 end
 
 
+-- host per upstream.pass_host: pass = client's Host, rewrite = configured
+-- upstream_host, node = picked node's host[:port]. Also used directly by the
+-- websocket phase, which has no nginx variable to fall back on for "pass".
+local function compute_upstream_host(api_ctx, picked_server)
+    local pass_host = api_ctx.pass_host or "pass"
+    if pass_host == "rewrite" then
+        return api_ctx.upstream_host
+    end
+
+    if pass_host == "node" then
+        return picked_server.upstream_host
+    end
+
+    return api_ctx.var.http_host
+end
+
+
 local function set_upstream_host(api_ctx, picked_server)
     local up_conf = api_ctx.upstream_conf
     if up_conf.pass_host then
@@ -302,17 +350,52 @@ local function set_upstream_host(api_ctx, picked_server)
         return
     end
 
-    if pass_host == "rewrite" then
-        api_ctx.var.upstream_host = api_ctx.upstream_host
-        return
-    end
-
-    api_ctx.var.upstream_host = picked_server.upstream_host
+    api_ctx.var.upstream_host = compute_upstream_host(api_ctx, picked_server)
 end
 
 
 local function set_upstream_headers(api_ctx, picked_server)
     set_upstream_host(api_ctx, picked_server)
+end
+
+
+-- hop-by-hop headers, plus handshake headers connect() already sets itself
+-- (host/protocols/origin opts, or generated Sec-WebSocket-Key/-Version).
+local ws_skip_forward_headers = {
+    ["host"] = true,
+    ["connection"] = true,
+    ["upgrade"] = true,
+    ["keep-alive"] = true,
+    ["te"] = true,
+    ["trailers"] = true,
+    ["proxy-authenticate"] = true,
+    ["proxy-authorization"] = true,
+    ["content-length"] = true,
+    ["transfer-encoding"] = true,
+    ["sec-websocket-key"] = true,
+    ["sec-websocket-version"] = true,
+    ["sec-websocket-extensions"] = true,
+    ["sec-websocket-protocol"] = true,
+    ["origin"] = true,
+}
+
+
+-- forwards the client's other headers (Cookie, Authorization, ...) upstream.
+local function build_ws_forward_headers(api_ctx)
+    local headers = {}
+    for name, value in pairs(core.request.headers(api_ctx)) do
+        if not ws_skip_forward_headers[str_lower(name)] then
+            if type(value) == "table" then
+                for _, v in ipairs(value) do
+                    headers[#headers + 1] = name .. ": " .. v
+                end
+            else
+                headers[#headers + 1] = name .. ": " .. value
+            end
+        end
+    end
+
+    return headers
 end
 
 
@@ -474,6 +557,42 @@ local function normalize_uri_like_servlet(uri)
     return core.table.concat(segs, '/')
 end
 
+-- Percent-decode every %XX in the path. When keep_slash is true, an encoded
+-- slash (%2F/%2f) is left as the literal text "%2F" instead of being turned
+-- into a real path separator -- Nginx decodes it into '/' in $uri, which makes
+-- it indistinguishable from a real separator and breaks path parameter
+-- matching (see issue #11810). The kept slash is always emitted upper-case so
+-- an exact route written with %2F matches regardless of the client's casing.
+local function percent_decode(path, keep_slash)
+    local decoded = re_gsub(path, [[%([0-9a-fA-F][0-9a-fA-F])]], function(m)
+        local hex = m[1]
+        if keep_slash and (hex == "2f" or hex == "2F") then
+            return "%2F"
+        end
+        return str_char(tonumber(hex, 16))
+    end, "jo")
+    return decoded
+end
+
+
+-- Build the route matching uri that keeps the encoded slash (%2F) encoded,
+-- using Nginx's already normalized $uri as an oracle instead of re-doing its
+-- normalization in Lua. If a plain full decode of the raw path reproduces
+-- current_uri ($uri) exactly, Nginx only decoded the request -- it applied no
+-- dot-segment resolution, no slash merging, no fragment stripping and it was
+-- not an absolute-form request line. Only then is it safe to keep %2F encoded,
+-- and the result provably differs from $uri solely by showing some '/' as
+-- "%2F". Anything else (path traversal, consecutive slashes, %00, exotic
+-- request lines) fails the equivalence check and returns nil so the caller
+-- keeps matching on $uri -- no bypass is possible even if the decode is wrong.
+local function build_match_uri_keep_encoded_slash(path, current_uri)
+    if percent_decode(path, false) ~= current_uri then
+        return nil
+    end
+    return percent_decode(path, true)
+end
+
+
 -- 同时执行全局插件和路由插件
 local function common_phase(phase_name)
     local api_ctx = ngx.ctx.api_ctx
@@ -481,7 +600,8 @@ local function common_phase(phase_name)
         return
     end
 
-    plugin.run_global_rules(api_ctx, api_ctx.global_rules, phase_name)
+    local global_rules, conf_version = apisix_global_rules.global_rules()
+    plugin.run_global_rules(api_ctx, global_rules, conf_version, phase_name)
 
     if api_ctx.script_obj then
         script.run(phase_name, api_ctx)
@@ -491,6 +611,38 @@ local function common_phase(phase_name)
     return plugin.run_plugin(phase_name, nil, api_ctx)
 end
 
+
+-- Resolve the upstream client certificate referenced by `tls.client_cert_id`
+-- into `api_ctx.upstream_ssl`. Shared by the http and stream subsystems.
+-- Returns false on error (invalid/missing referenced ssl object).
+local function resolve_upstream_client_cert(api_ctx)
+    if not (api_ctx.matched_upstream and api_ctx.matched_upstream.tls and
+            api_ctx.matched_upstream.tls.client_cert_id) then
+        return true
+    end
+
+    local cert_id = api_ctx.matched_upstream.tls.client_cert_id
+    local upstream_ssl = router.router_ssl.get_by_id(cert_id)
+    if not upstream_ssl or upstream_ssl.type ~= "client" then
+        local err = upstream_ssl and
+            "ssl type should be 'client'" or
+            "ssl id [" .. cert_id .. "] not exits"
+        core.log.error("failed to get ssl cert: ", err)
+        return false
+    end
+
+    core.log.info("matched upstream client ssl object, id: ", cert_id,
+                  ", type: ", upstream_ssl.type)
+
+    -- avoid the per-request deepcopy done by fetch_secrets when the ssl object
+    -- holds plain cert/key
+    if apisix_secret.has_secret_ref(upstream_ssl) then
+        upstream_ssl = apisix_secret.fetch_secrets(upstream_ssl, true) or upstream_ssl
+    end
+
+    api_ctx.upstream_ssl = upstream_ssl
+    return true
+end
 
 
 function _M.handle_upstream(api_ctx, route, enable_websocket)
@@ -539,28 +691,13 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
         api_ctx.matched_upstream = route_val.upstream
     end
 
-    --ssl 相关
-    if api_ctx.matched_upstream and api_ctx.matched_upstream.tls and
-        api_ctx.matched_upstream.tls.client_cert_id then
-
-        local cert_id = api_ctx.matched_upstream.tls.client_cert_id
-        local upstream_ssl = router.router_ssl.get_by_id(cert_id)
-        if not upstream_ssl or upstream_ssl.type ~= "client" then
-            local err  = upstream_ssl and
-                "ssl type should be 'client'" or
-                "ssl id [" .. cert_id .. "] not exits"
-            core.log.error("failed to get ssl cert: ", err)
-
-            if is_http then
-                return core.response.exit(502)
-            end
-
-            return ngx_exit(1)
+--ssl 相关
+    local ok = resolve_upstream_client_cert(api_ctx)
+    if not ok then
+        if is_http then
+            return core.response.exit(502)
         end
-
-        core.log.info("matched ssl: ",
-                  core.json.delay_encode(upstream_ssl, true))
-        api_ctx.upstream_ssl = upstream_ssl
+        return ngx_exit(1)
     end
 
     -- websocket相关头部
@@ -602,88 +739,117 @@ function _M.handle_upstream(api_ctx, route, enable_websocket)
     -- common_phase: 同时执行 plugin和global_rules
     common_phase("before_proxy")
 
+    -- Mark that the request will be proxied to upstream via NGINX.
+    -- Must be set after before_proxy plugins (which may call core.response.exit())
+    -- and before proxy_pass dispatch, so the log phase can distinguish
+    -- NGINX proxy errors from upstream responses.
+    if not api_ctx._resp_source then
+        api_ctx._apisix_proxied = true
+    end
+
     local up_scheme = api_ctx.upstream_scheme
     if up_scheme == "grpcs" or up_scheme == "grpc" then
         stash_ngx_ctx()
         return ngx.exec("@grpc_pass")
     end
 
+    if up_scheme == "wss" or up_scheme == "ws" then
+        -- @websocket_pass never runs proxy_pass, so it never gets the
+        -- `proxy_set_header X-Real-IP $remote_addr` / `... X-Forwarded-For
+        -- $proxy_add_x_forwarded_for` that ngx_tpl.lua's proxy_pass location
+        -- sends: set the same values here, once, so ws_handshake and later
+        -- phases see what proxy_pass routes would have seen, and
+        -- build_ws_forward_headers() (apisix/init.lua) can just forward them
+        -- like any other header instead of special-casing these two.
+        core.request.set_header(api_ctx, "X-Real-IP", api_ctx.var.remote_addr)
+        core.request.set_header(api_ctx, "X-Forwarded-For",
+                                api_ctx.var.proxy_add_x_forwarded_for)
+
+        common_phase("ws_handshake")
+
+        stash_ngx_ctx()
+        return ngx.exec("@websocket_pass")
+    end
+
     if api_ctx.dubbo_proxy_enabled then
         stash_ngx_ctx()
         return ngx.exec("@dubbo_pass")
     end
+
+    if ngx.ctx.disable_proxy_buffering then
+        stash_ngx_ctx()
+        return ngx.exec("@disable_proxy_buffering")
+    end
 end
 
 
-local function handle_x_forwarded_headers(api_ctx)
-    local addr_is_trusted = trusted_addresses_util.is_trusted(api_ctx.var.realip_remote_addr)
+-- X-Forwarded-Proto/Host/Port and Forwarded are already neutralized by the time
+-- this runs: `more_set_input_headers` in apisix/cli/ngx_tpl.lua does it in the
+-- rewrite phase, in C, on every request. That is unconditional because with no
+-- trust boundary configured -- the default -- it is what every request needs, and
+-- keeping it in the config keeps Lua off that path entirely.
+--
+-- What is left needs a trust decision, so it stays here, behind a check that is a
+-- constant for the worker's lifetime: with no `trusted_addresses` this returns on
+-- its first line and nothing else runs.
+--
+-- `set` captures an absent header as the empty string, so "" means the peer sent
+-- nothing and the value the config injected stays. That is a deliberate change
+-- for a trusted peer: the Lua-only implementation skipped the whole rewrite for
+-- one, so a header it did not send stayed absent and the upstream fell through to
+-- `$host` / `$server_port`. A trusted peer now gets the same observed values an
+-- untrusted one does -- the Host with its port and case, rather than the
+-- lower-cased portless `$host` -- which is the value the untrusted path has always
+-- produced. `ctx.var.http_x_forwarded_*` is updated alongside, so a plugin reading
+-- it in a later phase sees the restored value rather than the injected one.
+local function restore_if_sent(api_ctx, header_name, var_name, orig)
+    if not orig or orig == "" then
+        return
+    end
 
-    -- Only untrusted values need to be overwritten or cleared.
-    if not addr_is_trusted then
-        -- store the original x-forwarded-* headers
-        -- to allow future use by other plugins or processes
-        api_ctx.var.original_x_forwarded_proto = api_ctx.var.http_x_forwarded_proto
-        api_ctx.var.original_x_forwarded_host = api_ctx.var.http_x_forwarded_host
-        api_ctx.var.original_x_forwarded_port = api_ctx.var.http_x_forwarded_port
-        api_ctx.var.original_x_forwarded_for = api_ctx.var.http_x_forwarded_for
+    core.request.set_header(api_ctx, header_name, orig)
+    api_ctx.var[var_name] = orig
+end
 
-        -- trusted ones
-        -- ref: ngx_tpl.lua#L831-L840
-        --
-        -- these values are observed directly by APISIX and cannot be forged,
-        -- making them highly credible.
-        local proto = api_ctx.var.scheme
-        local host = api_ctx.var.host
-        local port = api_ctx.var.server_port
 
-        -- override the x-forwarded-* headers to the trusted ones.
-        -- make sure that the correct values ​​are obtained
-        -- in the subsequent stages using `core.request.header`.
-        core.request.set_header(api_ctx, "X-Forwarded-Proto", proto)
-        core.request.set_header(api_ctx, "X-Forwarded-Host", host)
-        core.request.set_header(api_ctx, "X-Forwarded-Port", port)
-        -- later processed in ngx_tpl by `$proxy_add_x_forwarded_for`.
+local function handle_trusted_x_forwarded_headers(api_ctx)
+    -- The other four originals are copied by the configuration; this one cannot be,
+    -- because naming `$http_x_forwarded_for` there would pin it in `r->variables[]`
+    -- and the clear below could not dislodge it. Copy it here instead, on every
+    -- path: the header is only destroyed further down, but a plugin reading
+    -- `ctx.var.original_x_forwarded_for` should not have to know that.
+    local inbound_xff = api_ctx.var.http_x_forwarded_for
+    if inbound_xff then
+        api_ctx.var.original_x_forwarded_for = inbound_xff
+    end
+
+    if not trusted_addresses_util.is_configured() then
+        return
+    end
+
+    if trusted_addresses_util.is_trusted(api_ctx.var.realip_remote_addr) then
+        -- a trusted peer's own values go back, from the copies the config took
+        -- before overwriting them
+        restore_if_sent(api_ctx, "X-Forwarded-Proto", "http_x_forwarded_proto",
+                        api_ctx.var.original_x_forwarded_proto)
+        restore_if_sent(api_ctx, "X-Forwarded-Host", "http_x_forwarded_host",
+                        api_ctx.var.original_x_forwarded_host)
+        restore_if_sent(api_ctx, "X-Forwarded-Port", "http_x_forwarded_port",
+                        api_ctx.var.original_x_forwarded_port)
+        restore_if_sent(api_ctx, "Forwarded", "http_forwarded",
+                        api_ctx.var.original_forwarded)
+
+        return
+    end
+
+    -- An untrusted peer, with a trust boundary to measure it against: drop the
+    -- inbound X-Forwarded-For so the upstream only sees the connection IP via
+    -- `$proxy_add_x_forwarded_for`. Without a boundary the chain is preserved,
+    -- which is the compatible default and is why this lives behind the check
+    -- above rather than in the config.
+    if inbound_xff then
         core.request.set_header(api_ctx, "X-Forwarded-For", nil)
-
-        -- update the cached value in http_x_forwarded_* to the trusted ones.
-        -- make sure that the correct values ​​are obtained
-        -- in the subsequent stages using `var.http_x_forwarded_*`.
-        api_ctx.var.http_x_forwarded_proto = proto
-        api_ctx.var.http_x_forwarded_host = host
-        api_ctx.var.http_x_forwarded_port = port
         api_ctx.var.http_x_forwarded_for = nil
-    end
-end
-
-
--- in ngx_tpl.lua#L831-L840,
--- there is such code: `proxy_set_header X-Forwarded-XXX $var_x_forwarded_xxx;`
--- that is, set the `X-Forwarded-XXX` header through `var_x_forwarded_xxx`.
---
--- therefore, it is necessary to set the trusted `http_x_forwarded_xxx` to `var_x_forwarded_xxx`.
--- So that the `X-Forwarded-XXX` header is updated to a trusted value.
---
--- currently, only following headers are updated through these variables:
--- - X-Forwarded-Proto
--- - X-Forwarded-Port
--- - X-Forwarded-Host
---
--- the `X-Forwarded-For` header is not updated through these variables.
--- because it is set by the `proxy_add_x_forwarded_for` directive.
-local function set_upstream_x_forwarded_headers(api_ctx)
-    local proto = api_ctx.var.http_x_forwarded_proto
-    if proto then
-        api_ctx.var.var_x_forwarded_proto = proto
-    end
-
-    local port = api_ctx.var.http_x_forwarded_port
-    if port then
-        api_ctx.var.var_x_forwarded_port = port
-    end
-
-    local host = api_ctx.var.http_x_forwarded_host
-    if host then
-        api_ctx.var.var_x_forwarded_host = host
     end
 end
 
@@ -702,8 +868,11 @@ function _M.http_access_phase()
     -- always fetch table from the table pool, we don't need a reused api_ctx
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
+    api_ctx.ngx_ctx = ngx_ctx
 
     core.ctx.set_vars_meta(api_ctx)
+
+    local span = tracer.start(ngx_ctx, "apisix.phase.access", tracer.kind.server)
 
     if not verify_https_client(api_ctx) then
         return core.response.exit(400)
@@ -729,9 +898,9 @@ function _M.http_access_phase()
             end
 
             api_ctx.var.uri = new_uri
-            -- forward the original uri so the servlet upstream
-            -- can consume the param after ';'
-            api_ctx.var.upstream_uri = uri
+            -- Forward the original path so servlet upstreams can consume params
+            -- after ';'. URI-encode it before proxying to keep delimiters as path data.
+            api_ctx.var.upstream_uri = core.utils.uri_safe_encode(uri)
         end
     end
 
@@ -743,23 +912,57 @@ function _M.http_access_phase()
     -- args arguments in the request line
     api_ctx.var.request_uri = api_ctx.var.uri .. api_ctx.var.is_args .. (api_ctx.var.args or "")
 
-    handle_x_forwarded_headers(api_ctx)
+    -- var.request is read-only; copy to a writable variable so data-mask can redact query params
+    api_ctx.var.request_line = api_ctx.var.request
 
-    router.router_http.match(api_ctx)
+    handle_trusted_x_forwarded_headers(api_ctx)
+
+    -- When match_uri_encoded_slash is on, match the route against a uri that
+    -- keeps the encoded slash (%2F) so it is treated as part of a path
+    -- parameter. This is a router-match-only value: it is swapped in just for
+    -- dispatch and restored right after, so the rewrite/access phases, plugins
+    -- and the upstream keep seeing the normalized ctx.var.uri. Only the matched
+    -- route and its captured params (uri_param_*) retain the encoded slash.
+    local match_uri
+    if local_conf.apisix and local_conf.apisix.match_uri_encoded_slash then
+        local path = api_ctx.var.real_request_uri
+        local args_pos = core.string.find(path, "?")
+        if args_pos then
+            path = str_sub(path, 1, args_pos - 1)
+        end
+        if core.string.find(path, "%2f") or core.string.find(path, "%2F") then
+            match_uri = build_match_uri_keep_encoded_slash(path, api_ctx.var.uri)
+        end
+    end
+
+    local match_span = tracer.start(ngx_ctx, "http_router_match", tracer.kind.internal)
+    if match_uri then
+        local normalized_uri = api_ctx.var.uri
+        api_ctx.var.uri = match_uri
+        router.router_http.match(api_ctx)
+        -- restore so downstream phases never observe the encoded-slash uri
+        api_ctx.var.uri = normalized_uri
+    else
+        router.router_http.match(api_ctx)
+    end
 
     local route = api_ctx.matched_route
     if not route then
+        match_span:set_status(tracer.status.ERROR, "no matched route")
+        match_span:finish(ngx.ctx)
         -- run global rule when there is no matching route
-        -- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
+-- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
         -- 一个global_rule可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
-        local global_rules = apisix_global_rules.global_rules()
-        -- 对于404的请求执行全局插件。如果phase_name=nil, 会执行插件的rewrite和access方法
-        plugin.run_global_rules(api_ctx, global_rules, nil)
+        -- 对于404的请求执行全局插件的rewrite和access方法
+        local global_rules, conf_version = apisix_global_rules.global_rules()
+        plugin.run_global_rules(api_ctx, global_rules, conf_version, "rewrite")
+        plugin.run_global_rules(api_ctx, global_rules, conf_version, "access")
 
         core.log.info("not find any matched route")
         return core.response.exit(404,
                     {error_msg = "404 Route Not Found"})
     end
+    match_span:finish(ngx_ctx)
 
     core.log.info("matched route: ",
                   core.json.delay_encode(api_ctx.matched_route, true))
@@ -809,21 +1012,24 @@ function _M.http_access_phase()
     api_ctx.route_id = route.value.id
     api_ctx.route_name = route.value.name
 
-    -- run global rule
-    local global_rules = apisix_global_rules.global_rules()
-    plugin.run_global_rules(api_ctx, global_rules, nil) -- 会执行插件的rewrite和access方法
+-- run global rule
+    -- Split global rule execution: run rewrite first so route/service plugins
+    -- can set overrides (e.g., client-control FFI) before global rule access
+    -- phase runs (e.g., logger body collection).
+    local global_rules, conf_version = apisix_global_rules.global_rules()
+    plugin.run_global_rules(api_ctx, global_rules, conf_version, "rewrite") -- 会执行插件的rewrite和access方法
 
     --执行route上配置的script https://apisix.apache.org/zh/docs/apisix/terminology/script/
     -- Script 与 Plugin 不兼容，并且 Script 优先执行 Script，这意味着配置 Script 后，
     -- Route 上配置的 Plugin 将不被执行。
     if route.value.script then
         script.load(route, api_ctx)
+        plugin.run_global_rules(api_ctx, global_rules, conf_version, "access")
         script.run("access", api_ctx)
 
     else
         local plugins = plugin.filter(api_ctx, route)
         api_ctx.plugins = plugins
-
         plugin.run_plugin("rewrite", plugins, api_ctx)
         if api_ctx.consumer then        --如果启用了认证插件
             local changed
@@ -858,16 +1064,21 @@ function _M.http_access_phase()
                 plugin.run_plugin(phase, api_ctx.plugins, api_ctx)
             end
         end
+        plugin.run_global_rules(api_ctx, global_rules, conf_version, "access")
         plugin.run_plugin("access", plugins, api_ctx)
     end
+    span:finish(ngx_ctx)
 
     _M.handle_upstream(api_ctx, route, enable_websocket)
-
-    set_upstream_x_forwarded_headers(api_ctx)
 end
 
 
 function _M.dubbo_access_phase()
+    ngx.ctx = fetch_ctx()
+end
+
+
+function _M.disable_proxy_buffering_access_phase()
     ngx.ctx = fetch_ctx()
 end
 
@@ -890,6 +1101,218 @@ function _M.grpc_access_phase()
         apisix_ngx_client.enable_mirror()
     end
 end
+
+-- call ws_x_frame hook
+function _M.websocket_content_phase()
+    ngx.ctx = fetch_ctx()
+    local api_ctx = ngx.ctx.api_ctx
+    local up_conf = api_ctx.upstream_conf
+    -- a Route's own `timeout` overrides upstream.timeout, same as
+    -- set_balancer_opts() does for the plain proxy_pass path
+    local route = api_ctx.matched_route
+    local up_timeout = (route and route.value and route.value.timeout) or up_conf.timeout
+    local connect_timeout_ms = up_timeout and up_timeout.connect and up_timeout.connect * 1000
+    local recv_timeout_ms = up_timeout and up_timeout.read and up_timeout.read * 1000
+    -- upstream.timeout.send is silently ignored for ws/wss
+
+    local ws_headers = build_ws_forward_headers(api_ctx)
+    local ws_protocols = core.request.header(api_ctx, "Sec-WebSocket-Protocol")
+    local ws_origin = core.request.header(api_ctx, "Origin")
+
+    -- resolve upstream.tls once, same as https/grpcs in apisix/upstream.lua
+    local ssl_verify, client_cert, client_priv_key
+    if api_ctx.matched_upstream.scheme == "wss" and up_conf.tls then
+        ssl_verify = up_conf.tls.verify
+
+        if up_conf.tls.client_cert or up_conf.tls.client_cert_id then
+            local cert_pem, key_pem
+            if up_conf.tls.client_cert_id then
+                cert_pem = api_ctx.upstream_ssl and api_ctx.upstream_ssl.cert
+                key_pem = api_ctx.upstream_ssl and api_ctx.upstream_ssl.key
+            else
+                cert_pem = up_conf.tls.client_cert
+                key_pem = up_conf.tls.client_key
+            end
+
+            local cert_err, key_err
+            client_cert, cert_err = apisix_ssl.fetch_cert(api_ctx.var.upstream_host, cert_pem)
+            if not client_cert then
+                ngx.log(ngx.ERR, "failed to fetch websocket upstream client cert: ", cert_err)
+                return core.response.exit(503)
+            end
+
+            client_priv_key, key_err = apisix_ssl.fetch_pkey(api_ctx.var.upstream_host, key_pem)
+            if not client_priv_key then
+                ngx.log(ngx.ERR, "failed to fetch websocket upstream client key: ", key_err)
+                return core.response.exit(503)
+            end
+        end
+    end
+
+    -- max_recv_len/max_send_len default to 65535 on each side unless the
+    -- websocket-proxy plugin's ws_handshake set larger limits on ctx. Each
+    -- side's receive limit is its own configured value; its send limit is
+    -- the *other* side's configured value, since what a role sends out is
+    -- always a message it just relayed in from its counterpart (a message
+    -- the real client sent needs the upstream side's send limit raised to
+    -- match the client side's receive limit, and vice versa). A nil field
+    -- keeps that direction's library default instead of silently raising it.
+    local client_new_opts, upstream_new_opts
+    local client_max_len = api_ctx.websocket_proxy_client_max_payload_len
+    local upstream_max_len = api_ctx.websocket_proxy_upstream_max_payload_len
+    if client_max_len or upstream_max_len then
+        client_new_opts = {max_recv_len = client_max_len, max_send_len = upstream_max_len}
+        upstream_new_opts = {max_recv_len = upstream_max_len, max_send_len = client_max_len}
+    end
+
+    local ok, proxy, err = pcall(ws_proxy.new, {
+        aggregate_fragments = true,
+        recv_timeout = recv_timeout_ms,
+        client_new_opts = client_new_opts,
+        upstream_new_opts = upstream_new_opts,
+        on_frame = function(proxy, role, typ, payload, last, code)
+            --   proxy: [table]       the proxy instance
+            --    role: [string]      "client" or "upstream"
+            --     typ: [string]      "text", "binary", "ping", "pong", "close"
+            -- payload: [string|nil]  payload if any
+            --    last: [boolean]     fin flag; true when aggregate_fragments is on
+            --    code: [number|nil]  code for "close" frames
+
+            local role_handler, err = core.websocket.get_role(role)
+            if not role_handler then
+                ngx.log(ngx.ERR, "invalid websocket role: ", err)
+                return
+            end
+
+            role_handler.stash_frame({
+                proxy = proxy,
+                type = typ,
+                payload = payload,
+                last = last,
+                code = code,
+            })
+
+            if role == "client" then
+                common_phase("ws_client_frame")
+            else
+                common_phase("ws_upstream_frame")
+            end
+
+            local new_frame = role_handler.get_frame()
+            return new_frame.payload, new_frame.code
+        end
+    })
+    if not ok then
+        ngx.log(ngx.ERR, "failed to create proxy: ", proxy)
+        return core.response.exit(500)
+    end
+    if not proxy then
+        ngx.log(ngx.ERR, "failed to create proxy: ", err)
+        return core.response.exit(500)
+    end
+
+    -- proxy:connect() only sends the 101 response to the downstream client
+    -- after it has successfully connected upstream, so it's safe to retry
+    -- against another node here without having committed to the client yet.
+    local retries = up_conf.retries
+    if not retries or retries < 0 then
+        retries = #up_conf.nodes - 1
+    end
+
+    local retry_deadline
+    if retries > 0 and up_conf.retry_timeout and up_conf.retry_timeout > 0 then
+        retry_deadline = ngx_now() + up_conf.retry_timeout
+    end
+
+    -- upstream_uri is only ever set by plugins like proxy-rewrite that
+    -- explicitly rewrite the forwarded path; the normal proxy_pass paths get
+    -- the client's original request URI for free from nginx's own passthrough
+    -- behavior, but we build the request line ourselves here, so we have to
+    -- fall back to the client's URI (plus query string) the same way
+    -- proxy-mirror.lua does.
+    local request_uri = api_ctx.var.upstream_uri
+    if not request_uri or request_uri == "" then
+        request_uri = api_ctx.var.uri .. (api_ctx.var.is_args or "") .. (api_ctx.var.args or "")
+    end
+
+    local server = api_ctx.picked_server
+    local ok, connect_err
+    for attempt = 0, retries do
+        if attempt > 0 and retry_deadline and retry_deadline < ngx_now() then
+            ngx.log(ngx.ERR, "websocket proxy retry timeout, retry count: ", attempt,
+                   ", deadline: ", retry_deadline, " now: ", ngx_now())
+            return core.response.exit(502)
+        end
+
+        if connect_timeout_ms then
+            proxy.client:set_timeout(connect_timeout_ms)
+        end
+
+        local endpoint = str_format("%s://%s:%d%s", api_ctx.matched_upstream.scheme,
+                                    server.host, server.port, request_uri)
+        ok, connect_err = proxy:connect(endpoint, {
+            host = compute_upstream_host(api_ctx, server),
+            server_name = server.domain,
+            headers = ws_headers,
+            protocols = ws_protocols,
+            origin = ws_origin,
+            ssl_verify = ssl_verify,
+            client_cert = client_cert,
+            client_priv_key = client_priv_key,
+        })
+        if ok then
+            break
+        end
+
+        ngx.log(ngx.ERR, "failed to connect to websocket upstream ", endpoint,
+               ": ", connect_err)
+
+        -- no balancer_by_lua* here, so report the outcome ourselves; a parsed
+        -- HTTP status (just not 101) is a passive HTTP status report, not tcp_failure
+        local prev_failure
+        local resp_status_code = proxy.client.resp_status_code
+        if resp_status_code then
+            prev_failure = {state = "ok", code = tonumber(resp_status_code)}
+        elseif connect_err and str_find(connect_err, "timeout", 1, true) then
+            prev_failure = {state = "failed", code = 504}
+        else
+            prev_failure = {state = "failed", code = 599}
+        end
+
+        if attempt >= retries then
+            -- last attempt: report it, pick_server() won't be called again
+            load_balancer.report_failure(api_ctx, prev_failure)
+            break
+        end
+
+        local next_server, pick_err = load_balancer.pick_server(api_ctx.matched_route,
+                                                                 api_ctx, prev_failure)
+        if not next_server then
+            ngx.log(ngx.ERR, "failed to pick next websocket upstream server: ", pick_err)
+            break
+        end
+
+        server = next_server
+        api_ctx.picked_server = server
+    end
+
+    if not ok then
+        return core.response.exit(502)
+    end
+
+    local done, err = proxy:execute()
+    if not done then
+        ngx.log(ngx.ERR, "failed proxying: ", err)
+        return core.response.exit(502)
+    end
+end
+
+
+function _M.websocket_log_phase()
+    common_phase("ws_close")
+    _M.http_log_phase()
+end
+
 
 -- 设置 X-APISIX-Upstream-Status 响应头
 local function set_resp_upstream_status(up_status)
@@ -918,6 +1341,8 @@ end
 
 --主要是执行插件的header_filter方法
 function _M.http_header_filter_phase()
+    local ngx_ctx = ngx.ctx
+    local span = tracer.start(ngx_ctx, "apisix.phase.header_filter", tracer.kind.server)
     core.response.set_header("Server", ver_header)
 
     local up_status = get_var("upstream_status")
@@ -925,21 +1350,35 @@ function _M.http_header_filter_phase()
         set_resp_upstream_status(up_status)     -- 设置 X-APISIX-Upstream-Status 响应头
     end
 
+    local api_ctx = ngx_ctx.api_ctx
+    if ngx.status == 101 then
+        api_ctx.var.request_type = "websocket"
+    end
+
     common_phase("header_filter")   -- 包括global_rules 和 路由上的plugins
 
-    local api_ctx = ngx.ctx.api_ctx
     if not api_ctx then
         return
     end
 
-    local debug_headers = api_ctx.debug_headers
-    if debug_headers then   -- 设置到 Apisix-Plugins响应头
-        local deduplicate = core.table.new(core.table.nkeys(debug_headers), 0)
-        for k, v in pairs(debug_headers) do
-            core.table.insert(deduplicate, k)
+    if debug.enable_debug() then
+        -- report the plugin phase functions in the execution order: the ones
+        -- executed so far were traced at execution time, while the
+        -- post-header ones of the matched plugins have not run yet and are
+        -- inferred, so they may not fully match the real execution
+        plugin.trace_expected_plugins_for_debug(api_ctx)
+
+        local debug_plugins = api_ctx.debug_plugins
+        if debug_plugins then
+            core.response.set_header("Apisix-Plugins",
+                                     core.table.concat(debug_plugins, ", "))    -- 设置到 Apisix-Plugins响应头
+        else
+            core.response.set_header("Apisix-Plugins", "no plugin")
         end
-        core.response.set_header("Apisix-Plugins", core.table.concat(deduplicate, ", "))
     end
+    span:finish(ngx_ctx)
+
+    tracer.start(ngx_ctx, "apisix.phase.body_filter", tracer.kind.server)
 end
 
 -- 依次执行 body_filter和delayed_body_filter阶段
@@ -1016,54 +1455,78 @@ function _M.status()
     core.response.exit(200, core.json.encode({ status = "ok" }))
 end
 
-function _M.status_ready()
-    local local_conf = core.config.local_conf()
-    local role = core.table.try_read_attr(local_conf, "deployment", "role")
-    local provider = core.table.try_read_attr(local_conf, "deployment", "role_" ..
-                                              role, "config_provider")
-    if provider == "yaml" or provider == "etcd" then
-        local status_shdict = ngx.shared["status-report"]
-        local ids = status_shdict:get_keys()
-        local error
-        local worker_count = ngx.worker.count()
-       if #ids ~= worker_count then
-            core.log.warn("worker count: ", worker_count, " but status report count: ", #ids)
-            error = "worker count: " .. ngx.worker.count() ..
-            " but status report count: " .. #ids
-        end
-        if error then
-            core.response.exit(503, core.json.encode({
-                status = "error",
-                error = error
-            }))
-            return
-        end
-        for _, id in ipairs(ids) do
-            local ready = status_shdict:get(id)
+
+local function discovery_ready_check()
+    local discovery_type = local_conf.discovery
+    if not discovery_type then
+        return true
+    end
+    for discovery_name, _ in pairs(discovery_type) do
+        local dis_module = discovery[discovery_name]
+        if dis_module.check_discovery_ready then
+            local ready, message = dis_module.check_discovery_ready()
             if not ready then
-                core.log.warn("worker id: ", id, " has not received configuration")
-                error = "worker id: " .. id ..
-                                  " has not received configuration"
-                break
+                return false, message
             end
         end
+    end
+    return true
+end
 
-        if error then
-            core.response.exit(503, core.json.encode({
-                status = "error",
-                error = error
-            }))
-            return
+local function config_ready_check()
+    local role = core.table.try_read_attr(local_conf, "deployment", "role")
+    local provider = core.table.try_read_attr(local_conf, "deployment",
+                                              "role_" .. role, "config_provider")
+    if provider ~= "yaml" and provider ~= "etcd" then
+        return false, "unknown config provider: " .. tostring(provider)
+    end
+
+    local status_shdict = ngx.shared["status-report"]
+    if not status_shdict then
+        core.log.error("failed to get ngx.shared dict status-report")
+        return false, "failed to get ngx.shared dict status-report"
+    end
+    local ids = status_shdict:get_keys()
+
+    local worker_count = ngx.worker.count()
+    if #ids ~= worker_count then
+        local error = "worker count: " .. worker_count .. " but status report count: " .. #ids
+        core.log.error(error)
+        return false, error
+    end
+    for _, id in ipairs(ids) do
+        local ready = status_shdict:get(id)
+        if not ready then
+            local error = "worker id: " .. id .. " has not received configuration"
+            core.log.error(error)
+            return false, error
         end
+    end
 
-        core.response.exit(200, core.json.encode({ status = "ok" }))
+    return true
+end
+
+function _M.status_ready()
+    local ready, message = config_ready_check()
+    if not ready then
+        core.response.exit(503, core.json.encode({
+            status = "error",
+            error = message
+        }))
         return
     end
 
-    core.response.exit(503, core.json.encode({
-        status = "error",
-        message = "unknown config provider: " .. tostring(provider)
-    }), { ["Content-Type"] = "application/json" })
+    ready, message = discovery_ready_check()
+    if not ready then
+        core.response.exit(503, core.json.encode({
+            status = "error",
+            error = message
+        }))
+        return
+    end
+
+    core.response.exit(200, core.json.encode({ status = "ok" }))
+    return
 end
 
 
@@ -1072,6 +1535,7 @@ function _M.http_log_phase()
     if not api_ctx then
         return
     end
+    tracer.finish_all(api_ctx.ngx_ctx)
 
     if not api_ctx.var.apisix_upstream_response_time or
     api_ctx.var.apisix_upstream_response_time == "" then
@@ -1094,9 +1558,16 @@ function _M.http_log_phase()
         core.tablepool.release("plugins", api_ctx.plugins)   -- 回收 plugins
     end
 
+    if api_ctx.global_plugins then
+        core.tablepool.release("global_plugins", api_ctx.global_plugins)
+    end
+
     if api_ctx.curr_req_matched then
         core.tablepool.release("matched_route_record", api_ctx.curr_req_matched)
     end
+
+    tracer.release(api_ctx.ngx_ctx)
+    api_ctx.ngx_ctx = nil
 
     core.tablepool.release("api_ctx", api_ctx)
 end
@@ -1181,6 +1652,7 @@ function _M.stream_init(args)
     core.log.info("enter stream_init")
 
     core.resolver.init_resolver(args)
+    core.env.init()
 
     if core.config.init then
         local ok, err = core.config.init()
@@ -1204,7 +1676,23 @@ function _M.stream_init_worker()
     -- for testing only
     core.log.info("random stream test in [1, 10000]: ", math.random(1, 10000))
 
+    -- The stream subsystem runs in its own Lua VM, so the env snapshot built in
+    -- http_init_worker is not visible here. Rebuild it before any consumer (e.g.
+    -- kubernetes discovery's read_env) runs, otherwise core.env.get falls back to
+    -- the buggy os.getenv shim. See #13055.
+    core.env.init()
+
     core.lrucache.init_worker()
+
+    -- admin.init.init_worker() registers an events callback, so events must
+    -- already be initialized here
+    require("apisix.events").init_worker()
+
+    -- must run before core.config.init_worker() and router.stream_init_worker():
+    -- it patches the resource schemas (e.g. allowing modifiedIndex) that
+    -- those two synchronously validate data against as part of their own
+    -- worker startup, same as in http_init_worker
+    require("apisix.admin.init").init_worker()
 
     if core.config.init_worker then
         local ok, err = core.config.init_worker()
@@ -1216,16 +1704,11 @@ function _M.stream_init_worker()
 
     plugin.init_worker()
     xrpc.init_worker()
+    apisix_secret.init_worker()
     router.stream_init_worker()
     require("apisix.http.service").init_worker()
     apisix_upstream.init_worker()
 
-    require("apisix.events").init_worker()
-
-    -- for admin api of standalone mode, we need to startup background timer and patch schema etc.
-    require("apisix.admin.init").init_worker()
-
-    local discovery = require("apisix.discovery.init").discovery
     if discovery and discovery.init_worker then
         discovery.init_worker()
     end
@@ -1236,16 +1719,67 @@ function _M.stream_init_worker()
 end
 
 
-function _M.stream_preread_phase()
+-- Preread phase of a mixed TLS listen: pick which internal server gets the
+-- connection. Plugins and the log phase run there, not here.
+function _M.stream_tls_route_phase(terminate_upstream, passthrough_upstream)
     local ngx_ctx = ngx.ctx
     local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
     ngx_ctx.api_ctx = api_ctx
+    -- nothing was terminated here, so the SNI can only come from the ClientHello
+    api_ctx.tls_passthrough = true
 
-    if not verify_tls_client(api_ctx) then
+    core.ctx.set_vars_meta(api_ctx)
+
+    local ok, err = router.router_stream.match(api_ctx)
+    if not ok then
+        core.log.error(err)
+    end
+
+    -- an unmatched connection goes to the terminating server, which reports the miss
+    local matched_route = api_ctx.matched_route
+    local target = terminate_upstream
+    if matched_route and matched_route.value.tls_passthrough then
+        target = passthrough_upstream
+    end
+    ngx_var.stream_tls_target = target
+
+    core.log.info("stream tls route: sni: ", api_ctx.var.ssl_preread_server_name,
+                  ", target: ", target)
+
+    core.ctx.release_vars(api_ctx)
+    core.tablepool.release("api_ctx", api_ctx)
+    ngx_ctx.api_ctx = nil
+end
+
+
+-- `tls_passthrough` is set by the template on listens running `ssl_preread on`:
+-- no local handshake, so no client certificate to verify and the SNI is prereaded.
+function _M.stream_preread_phase(tls_passthrough, behind_mixed_hop)
+    local ngx_ctx = ngx.ctx
+    local api_ctx = core.tablepool.fetch("api_ctx", 0, 32)
+    ngx_ctx.api_ctx = api_ctx
+    api_ctx.tls_passthrough = tls_passthrough
+
+    if not tls_passthrough and not verify_tls_client(api_ctx) then
         return ngx_exit(1)
     end
 
     core.ctx.set_vars_meta(api_ctx)
+
+    -- On the internal servers of a mixed listen the connection arrives over a unix
+    -- socket, so $server_addr/$server_port describe that socket rather than the port
+    -- the client reached. The real one is in the PROXY protocol header, and routes
+    -- match on it.
+    if behind_mixed_hop then
+        local addr = ngx_var.proxy_protocol_server_addr
+        if addr and addr ~= "" then
+            api_ctx.var.server_addr = addr
+        end
+        local port = ngx_var.proxy_protocol_server_port
+        if port and port ~= "" then
+            api_ctx.var.server_port = port
+        end
+    end
 
     local ok, err = router.router_stream.match(api_ctx)
     if not ok then
@@ -1323,15 +1857,32 @@ function _M.stream_preread_phase()
     api_ctx.plugins = plugin.stream_filter(matched_route, plugins)
     -- core.log.info("valid plugins: ", core.json.delay_encode(plugins, true))
 
-    api_ctx.conf_type = "stream/route"
-    api_ctx.conf_version = matched_route.modifiedIndex
-    api_ctx.conf_id = matched_route.value.id
+    if not api_ctx.conf_type then
+        api_ctx.conf_type = "stream/route"
+        api_ctx.conf_version = matched_route.modifiedIndex
+        api_ctx.conf_id = matched_route.value.id
+    end
+    api_ctx.route_id = matched_route.value.id
+    api_ctx.route_name = matched_route.value.name
 
     plugin.run_plugin("preread", plugins, api_ctx)
+
+    if api_ctx.upstream_id then
+        local new_upstream = apisix_upstream.get_by_id(api_ctx.upstream_id)
+        if not new_upstream then
+            return ngx_exit(1)
+        end
+        api_ctx.matched_upstream = new_upstream
+    end
 
     if matched_route.value.protocol then
         xrpc.run_protocol(matched_route.value.protocol, api_ctx)
         return
+    end
+
+    local ok = resolve_upstream_client_cert(api_ctx)
+    if not ok then
+        return ngx_exit(1)
     end
 
     local code, err = set_upstream(matched_route, api_ctx)
@@ -1374,6 +1925,10 @@ function _M.stream_log_phase()
     end
 
     healthcheck_passive(api_ctx)
+
+    if api_ctx.server_picker and api_ctx.server_picker.after_balance then
+        api_ctx.server_picker.after_balance(api_ctx, false)
+    end
 
     core.ctx.release_vars(api_ctx)
     if api_ctx.plugins then

@@ -43,6 +43,16 @@ local function filter(route)
         end
     end
 
+    -- the same filter runs for stream routes, whose SNIs are matched against
+    -- apisix/ssl.lua's server_name(), which always returns them lowercased
+    if route.value.sni then
+        route.value.sni = str_lower(route.value.sni)
+    elseif route.value.snis then
+        for i, v in ipairs(route.value.snis) do
+            route.value.snis[i] = str_lower(v)
+        end
+    end
+
     apisix_upstream.filter_upstream(route.value.upstream, route)
 end
 
@@ -90,6 +100,14 @@ function _M.http_init_worker()
     local router_ssl = require("apisix.ssl.router." .. router_ssl_name)
     router_ssl.init_worker()
     _M.router_ssl = router_ssl
+
+    -- Initialize stream router in HTTP workers only if stream mode is enabled
+    -- This allows the Control API (which runs in HTTP workers) to access stream routes
+    if conf and conf.apisix and conf.apisix.stream_proxy then
+        local router_stream = require("apisix.stream.router.ip_port")
+        router_stream.stream_init_worker(filter)
+        _M.router_stream = router_stream
+    end
 
     -- 初始化api路由
     _M.api = require("apisix.api_router")

@@ -66,8 +66,6 @@ If you would like to make adjustments to plugins installation, add the customize
 plugins:
   - real-ip                   # installed
   - ai
-  - real-ip
-  - ai
   - client-control
   - proxy-control
   - request-id
@@ -88,6 +86,8 @@ You should reload APISIX for configuration changes to take effect.
 An installed plugin is first initialized. The configuration of the plugin is then checked against the defined [JSON Schema](https://json-schema.org) to make sure the plugins configuration schema is correct.
 
 When a request goes through APISIX, the plugin's corresponding methods are executed in one or more of the following phases : `rewrite`, `access`, `before_proxy`, `header_filter`, `body_filter`, and `log`. These phases are largely influenced by the [OpenResty directives](https://openresty-reference.readthedocs.io/en/latest/Directives/).
+
+A route whose `upstream.scheme` is `ws` or `wss` still runs `rewrite`/`access`/`before_proxy`/`log` normally, but replaces `header_filter`/`body_filter`/`delayed_body_filter` with four WebSocket-specific phases: `ws_handshake`, `ws_client_frame`, `ws_upstream_frame`, and `ws_close`. See the ["extra phase" section of the plugin development guide](../plugin-develop.md#extra-phase) for details.
 
 <br />
 <div style={{textAlign: 'center'}}>

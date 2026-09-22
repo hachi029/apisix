@@ -16,10 +16,11 @@
 --
 local core = require("apisix.core")
 local ngx = ngx
-local ngx_re = require("ngx.re")
 local consumer = require("apisix.consumer")
 local schema_def = require("apisix.schema_def")
 local auth_utils = require("apisix.utils.auth")
+local str_find = string.find
+local str_sub = string.sub
 
 local lrucache = core.lrucache.new({
     ttl = 300, count = 512
@@ -32,9 +33,10 @@ local schema = {
         hide_credentials = {
             type = "boolean",
             default = false,
-        }
+        },
+        realm = schema_def.get_realm_schema("basic"),
+        anonymous_consumer = schema_def.anonymous_consumer_schema,
     },
-    anonymous_consumer = schema_def.anonymous_consumer_schema,
 }
 
 local consumer_schema = {
@@ -42,7 +44,7 @@ local consumer_schema = {
     title = "work with consumer object",
     properties = {
         username = { type = "string" },
-        password = { type = "string" },
+        password = { type = "string", minLength = 1 },
     },
     encrypt_fields = {"password"},
     required = {"username", "password"},
@@ -97,17 +99,15 @@ local function extract_auth_header(authorization)
             return nil, "Failed to decode authentication header: " .. m[1]
         end
 
-        local res
-        res, err = ngx_re.split(decoded, ":")
-        if err then
-            return nil, "Split authorization err:" .. err
-        end
-        if #res < 2 then
+        -- https://www.rfc-editor.org/info/rfc7617/#section-2 Page 4
+        -- RFC 7617: split on the first colon only; the password may contain ':'
+        local sep = str_find(decoded, ":", 1, true)
+        if not sep then
             return nil, "Split authorization err: invalid decoded data: " .. decoded
         end
 
-        obj.username = ngx.re.gsub(res[1], "\\s+", "", "jo")
-        obj.password = ngx.re.gsub(res[2], "\\s+", "", "jo")
+        obj.username = ngx.re.gsub(str_sub(decoded, 1, sep - 1), "\\s+", "", "jo")
+        obj.password = ngx.re.gsub(str_sub(decoded, sep + 1), "\\s+", "", "jo")
         return obj, nil
     end
 
@@ -125,7 +125,6 @@ end
 local function find_consumer(ctx)
     local auth_header = core.request.header(ctx, "Authorization")
     if not auth_header then
-        core.response.set_header("WWW-Authenticate", "Basic realm='.'")
         return nil, nil, "Missing authorization in request"
     end
 
@@ -149,7 +148,20 @@ local function find_consumer(ctx)
         return nil, nil, "Invalid user authorization"
     end
 
-    if cur_consumer.auth_conf.password ~= password then
+    -- the schema rejects an empty password on write and on load, but a secret
+    -- reference ($secret:// or $env://) is resolved after validation and can
+    -- yield "": fail closed so such a consumer never authenticates
+    local expected = cur_consumer.auth_conf.password
+    if expected == "" then
+        err = "empty password configured for consumer: " .. cur_consumer.consumer_name
+        if auth_utils.is_running_under_multi_auth(ctx) then
+            return nil, nil, err
+        end
+        core.log.warn(err)
+        return nil, nil, "Invalid user authorization"
+    end
+
+    if expected ~= password then
         return nil, nil, "Invalid user authorization"
     end
 
@@ -158,15 +170,17 @@ end
 
 
 function _M.rewrite(conf, ctx)
-    local cur_consumer, consumer_conf, err = find_consumer(ctx)
+    local cur_consumer, consumer_conf, err = find_consumer(ctx, conf)
     if not cur_consumer then
         if not conf.anonymous_consumer then
+            core.response.set_header("WWW-Authenticate", "Basic realm=\"" .. conf.realm .. "\"")
             return 401, { message = err }
         end
         cur_consumer, consumer_conf, err = consumer.get_anonymous_consumer(conf.anonymous_consumer)
         if not cur_consumer then
             err = "basic-auth failed to authenticate the request, code: 401. error: " .. err
             core.log.error(err)
+            core.response.set_header("WWW-Authenticate", "Basic realm=\"" .. conf.realm .. "\"")
             return 401, { message = "Invalid user authorization" }
         end
     end

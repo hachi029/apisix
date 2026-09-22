@@ -33,7 +33,7 @@ function detect_aur_helper() {
 function install_dependencies_with_aur() {
     detect_aur_helper
     $AUR_HELPER -S openresty --noconfirm
-    sudo pacman -S openssl --noconfirm
+    sudo pacman -S openssl base-devel git --noconfirm
 
     export OPENRESTY_PREFIX=/opt/openresty
 
@@ -55,8 +55,8 @@ function install_dependencies_with_yum() {
     fi
     sudo yum install -y  \
         gcc gcc-c++ curl wget unzip xz gnupg perl-ExtUtils-Embed cpanminus patch libyaml-devel \
-        perl perl-devel pcre pcre-devel openldap-devel \
-        openresty-zlib-devel openresty-pcre-devel
+        perl perl-devel pcre pcre-devel pcre2 pcre2-devel openldap-devel \
+        openresty-zlib-devel openresty-pcre-devel libxml2-devel libxslt-devel zlib-devel
 }
 
 # Install dependencies on ubuntu and debian
@@ -73,12 +73,15 @@ function install_dependencies_with_apt() {
     if [[ "${1}" == "ubuntu" ]]; then
         sudo add-apt-repository -y "deb http://openresty.org/package/${arch_path}ubuntu $(lsb_release -sc) main"
     elif [[ "${1}" == "debian" ]]; then
-        sudo add-apt-repository -y "deb http://openresty.org/package/${arch_path}debian $(lsb_release -sc) openresty"
+        # add-apt-repository on Debian 12 writes an empty list file for a plain
+        # deb line, so the repository never makes it into apt
+        echo "deb http://openresty.org/package/${arch_path}debian $(lsb_release -sc) openresty" \
+            | sudo tee /etc/apt/sources.list.d/openresty.list
     fi
     sudo apt-get update
 
     # install some compilation tools
-    sudo apt-get install -y curl make gcc g++ cpanminus libpcre3 libpcre3-dev libyaml-dev unzip openresty-zlib-dev openresty-pcre-dev
+    sudo apt-get install -y curl make gcc g++ cpanminus libpcre3 libpcre3-dev libpcre2-dev libyaml-dev unzip openresty-zlib-dev openresty-pcre-dev libxml2-dev libxslt-dev zlib1g-dev
 }
 
 # Identify the different distributions and call the corresponding function

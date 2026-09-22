@@ -20,6 +20,7 @@ local expr = require("resty.expr.v1")
 local content_decode = require("apisix.utils.content-decode")
 local ngx = ngx
 local pairs = pairs
+local type = type
 local ngx_now = ngx.now
 local ngx_header = ngx.header
 local os_date = os.date
@@ -32,7 +33,9 @@ local is_http = ngx.config.subsystem == "http"
 local req_get_body_file = ngx.req.get_body_file
 local MAX_REQ_BODY      = 524288      -- 512 KiB
 local MAX_RESP_BODY     = 524288      -- 512 KiB
+local MAX_LOG_FORMAT_DEPTH = 5
 local io                = io
+local req_read_body = ngx.req.read_body
 
 local lru_log_format = core.lrucache.new({
     ttl = 300, count = 512
@@ -77,22 +80,35 @@ end
 -- 配置完成后，日志格式：
 -- {"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
 --{"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
-local function gen_log_format(format)
+local function do_gen_log_format(format, depth)
     local log_format = {}
     for k, var_name in pairs(format) do
-        if var_name:byte(1, 1) == str_byte("$") then
+        if type(var_name) == "table" then
+            if depth >= MAX_LOG_FORMAT_DEPTH then
+                core.log.warn("log_format nesting exceeds max depth ",
+                              MAX_LOG_FORMAT_DEPTH, ", truncating")
+                log_format[k] = {false, {}}
+            else
+                local nested_format = do_gen_log_format(var_name, depth + 1)
+                log_format[k] = {false, nested_format}
+            end
+        elseif type(var_name) == "string" and var_name:byte(1, 1) == str_byte("$") then
             log_format[k] = {true, var_name:sub(2)}
         else
             log_format[k] = {false, var_name}
         end
     end
+    return log_format
+end
+
+local function gen_log_format(format)
+    local log_format = do_gen_log_format(format, 1)
     core.log.info("log_format: ", core.json.delay_encode(log_format))
     return log_format
 end
 
 -- 根据log_format返回真实的log
-local function get_custom_format_log(ctx, format, max_req_body_bytes)
-    local log_format = lru_log_format(format or "", nil, gen_log_format, format)
+local function build_log_entry(ctx, log_format, max_req_body_bytes)
     local entry = core.table.new(0, core.table.nkeys(log_format))
     for k, var_attr in pairs(log_format) do
         if var_attr[1] then -- 标识是否是变量，即是否以$开头
@@ -108,10 +124,19 @@ local function get_custom_format_log(ctx, format, max_req_body_bytes)
             else
                 entry[k] = ctx.var[var_attr[2]]
             end
+        elseif type(var_attr[2]) == "table" then
+            entry[k] = build_log_entry(ctx, var_attr[2], max_req_body_bytes)
         else        --字面量
             entry[k] = var_attr[2]
         end
     end
+    return entry
+end
+
+
+local function get_custom_format_log(ctx, format, max_req_body_bytes)
+    local log_format = lru_log_format(format or "", nil, gen_log_format, format)
+    local entry = build_log_entry(ctx, log_format, max_req_body_bytes)
 
     local matched_route = ctx.matched_route and ctx.matched_route.value
     if matched_route then   --必选的附加字段
@@ -186,7 +211,7 @@ local function get_full_log(ngx, conf)
             url = url,
             uri = var.request_uri,
             method = ngx.req.get_method(),
-            headers = ngx.req.get_headers(),
+            headers = ctx.data_mask_headers or ngx.req.get_headers(),
             querystring = ngx.req.get_uri_args(),
             size = var.request_length
         },
@@ -286,9 +311,20 @@ function _M.get_log_entry(plugin_name, conf, ctx)
 
     local entry
     local customized = false
+    -- resolved log_format_extra fields, surfaced to callers that rebuild a
+    -- fixed payload (e.g. google-cloud-logging, splunk) so extras aren't dropped
+    local extra_entry
 
     local has_meta_log_format = metadata and metadata.value.log_format
         and core.table.nkeys(metadata.value.log_format) > 0
+
+    -- conf value wins when present (even if empty), matching log_format;
+    -- only fall back to plugin metadata when conf has no log_format_extra
+    local log_format_extra = conf.log_format_extra
+    if log_format_extra == nil and metadata and metadata.value.log_format_extra then
+        log_format_extra = metadata.value.log_format_extra
+    end
+    local has_extra = log_format_extra and core.table.nkeys(log_format_extra) > 0
 
     if conf.log_format or has_meta_log_format then
         customized = true
@@ -297,6 +333,22 @@ function _M.get_log_entry(plugin_name, conf, ctx)
     else
         if is_http then
             entry = get_full_log(ngx, conf)
+            -- enrich the default rich log with extra user-defined fields without
+            -- replacing it, so callers keep every default field and add their own
+            if has_extra then
+                -- get_custom_format_log also appends route_id/service_id; keep only
+                -- the user-declared keys so callers don't leak unrequested fields
+                local tmp = get_custom_format_log(ctx, log_format_extra,
+                                                  conf.max_req_body_bytes)
+                extra_entry = {}
+                for k in pairs(log_format_extra) do
+                    extra_entry[k] = tmp[k]
+                    -- never clobber a default field, only add new ones
+                    if entry[k] == nil then
+                        entry[k] = tmp[k]
+                    end
+                end
+            end
         else
             -- get_full_log doesn't work in stream
             core.log.error(plugin_name, "'s log_format is not set")
@@ -312,7 +364,7 @@ function _M.get_log_entry(plugin_name, conf, ctx)
     if ctx.llm_response_text then
         entry.llm_response_text = ctx.llm_response_text
     end
-    return entry, customized
+    return entry, customized, extra_entry
 end
 
 -- 获取文本格式的请求报文
@@ -320,7 +372,7 @@ function _M.get_req_original(ctx, conf)
     local data = {
         ctx.var.request, "\r\n"
     }
-    for k, v in pairs(ngx.req.get_headers()) do
+    for k, v in pairs(ctx.data_mask_headers or ngx.req.get_headers()) do
         core.table.insert_tail(data, k, ": ", v, "\r\n")
     end
     core.table.insert(data, "\r\n")
@@ -380,18 +432,14 @@ function _M.collect_body(conf, ctx)
         if log_response_body then
             local max_resp_body_bytes = conf.max_resp_body_bytes or MAX_RESP_BODY
 
-            -- 读取到的响应体已经大于max_resp_body_bytes了
-            if ctx._resp_body_bytes and ctx._resp_body_bytes >= max_resp_body_bytes then
-                return
-            end
-            local final_body = core.response.hold_body_chunk(ctx, true, max_resp_body_bytes)
+            local final_body = core.response.hold_body_chunk(ctx, true, max_resp_body_bytes, conf)
             if not final_body then      -- 为nil 表示不是最后一个chunk
                 return
             end
 
             -- 获取响应体压缩格式
             local response_encoding = ngx_header["Content-Encoding"]
-            if not response_encoding then
+            if not response_encoding or ctx.gzip_matched then
                 ctx.resp_body = final_body
                 return
             end
@@ -424,6 +472,32 @@ function _M.get_rfc3339_zulu_timestamp(timestamp)
     local second = math_floor(now)
     local millisecond = math_floor((now - second) * 1000)
     return os_date("!%Y-%m-%dT%T.", second) .. core.string.format("%03dZ", millisecond)
+end
+
+
+function _M.check_and_read_req_body(conf, ctx)
+    if conf.include_req_body then
+        local should_read_body = true
+        if conf.include_req_body_expr then
+            if not conf.request_expr then
+                local request_expr, err = expr.new(conf.include_req_body_expr)
+                if not request_expr then
+                    core.log.error('generate request expr err ', err)
+                    return
+                end
+                conf.request_expr = request_expr
+            end
+
+            local result = conf.request_expr:eval(ctx.var)
+
+            if not result then
+                should_read_body = false
+            end
+        end
+        if should_read_body then
+            req_read_body()
+        end
+    end
 end
 
 

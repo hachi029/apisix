@@ -106,7 +106,7 @@ done
 --- request
 GET /t
 --- response_body
-property "burst" is required
+value should match only one schema, but matches none
 done
 
 
@@ -321,7 +321,7 @@ GET /test_concurrency
 GET /t
 --- error_code: 400
 --- response_body
-{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" is required"}
+{"error_msg":"failed to check the configuration of plugin limit-conn err: value should match only one schema, but matches none"}
 
 
 
@@ -362,7 +362,7 @@ GET /t
 GET /t
 --- error_code: 400
 --- response_body
-{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" validation failed: expected -1 to be greater than 0"}
+{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" validation failed: value should match only one schema, but matches none"}
 
 
 
@@ -401,7 +401,7 @@ GET /t
 GET /t
 --- error_code: 400
 --- response_body
-{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" is required"}
+{"error_msg":"failed to check the configuration of plugin limit-conn err: value should match only one schema, but matches none"}
 
 
 
@@ -441,7 +441,7 @@ GET /t
 GET /t
 --- error_code: 400
 --- response_body
-{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" validation failed: expected -1 to be greater than 0"}
+{"error_msg":"failed to check the configuration of plugin limit-conn err: property \"conn\" validation failed: value should match only one schema, but matches none"}
 
 
 
@@ -622,8 +622,8 @@ GET /test_concurrency
 503
 503
 503
---- error_log
-limit key: 10.10.10.1route
+--- error_log eval
+qr/limit key: \/apisix\/routes\/1:\d+:10\.10\.10\.1/
 
 
 
@@ -713,8 +713,8 @@ GET /test_concurrency
 503
 503
 503
---- error_log
-limit key: 10.10.10.2route
+--- error_log eval
+qr/limit key: \/apisix\/routes\/1:\d+:10\.10\.10\.2/
 
 
 
@@ -868,7 +868,7 @@ GET /test_concurrency
 --- request
 GET /t
 --- response_body
-property "conn" validation failed: expected 0 to be greater than 0
+property "conn" validation failed: value should match only one schema, but matches none
 property "default_conn_delay" validation failed: expected 0 to be greater than 0
 done
 
@@ -987,8 +987,8 @@ GET /test_concurrency
 200
 200
 200
---- error_log_like eval
-qr/limit key: consumer_jackroute&consumer\d+/
+--- error_log eval
+qr/limit key: \/apisix\/routes\/\d+:\d+:consumer_jack/
 
 
 
@@ -1076,8 +1076,8 @@ GET /test_concurrency
 503
 503
 503
---- error_log_like eval
-qr/limit key: consumer_jackroute&consumer\d+/
+--- error_log eval
+qr/limit key: \/apisix\/routes\/\d+:\d+:consumer_jack/
 
 
 
@@ -1101,7 +1101,7 @@ qr/limit key: consumer_jackroute&consumer\d+/
 --- request
 GET /t
 --- response_body
-property "burst" is required
+value should match only one schema, but matches none
 done
 
 

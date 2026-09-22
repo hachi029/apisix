@@ -1,4 +1,3 @@
---
 -- Licensed to the Apache Software Foundation (ASF) under one or more
 -- contributor license agreements.  See the NOTICE file distributed with
 -- this work for additional information regarding copyright ownership.
@@ -17,36 +16,34 @@
 local type         = type
 local pairs        = pairs
 local ipairs       = ipairs
+local pcall        = pcall
+local tostring     = tostring
+local tonumber     = tonumber
 local str_lower    = string.lower
 local str_find     = string.find
 local str_sub      = string.sub
-local tostring     = tostring
+local str_gmatch   = string.gmatch
+local table_concat = table.concat
 local ngx          = ngx
 local ngx_time     = ngx.time
+local ngx_now      = ngx.now
+local ngx_sleep    = ngx.sleep
 local get_method   = ngx.req.get_method
-local shared_dict  = ngx.shared["standalone-config"]
+local worker_count = ngx.worker.count
 local timer_every  = ngx.timer.every
 local exiting      = ngx.worker.exiting
-local table_insert = table.insert
-local table_new    = require("table.new")
+local subsystem    = ngx.config.subsystem
 local yaml         = require("lyaml")
 local events       = require("apisix.events")
 local core         = require("apisix.core")
+local config_local = require("apisix.core.config_local")
 local config_yaml  = require("apisix.core.config_yaml")
-local tbl_deepcopy = require("apisix.core.table").deepcopy
-local constants    = require("apisix.constants")
+local config_validate = require("apisix.admin.config_validate")
 
--- combine all resources that using in http and stream substreams as one constant
-local CONF_VERSION_KEY_SUFFIX = "_conf_version"
-local ALL_RESOURCE_KEYS = {}
-for dir in pairs(constants.HTTP_ETCD_DIRECTORY) do
-    local key = str_sub(dir, 2)
-    ALL_RESOURCE_KEYS[key] = key .. CONF_VERSION_KEY_SUFFIX
-end
-for dir in pairs(constants.STREAM_ETCD_DIRECTORY) do
-    local key = str_sub(dir, 2)
-    ALL_RESOURCE_KEYS[key] = key .. CONF_VERSION_KEY_SUFFIX
-end
+local shared_dict        = ngx.shared["standalone-config"]
+local status_shared_dict = ngx.shared["standalone-status"]
+
+local ALL_RESOURCE_KEYS = config_validate.get_all_resource_keys()
 
 local EVENT_UPDATE = "standalone-api-configuration-update"
 local NOT_FOUND_ERR = "not found"
@@ -57,49 +54,52 @@ local METADATA_DIGEST = "X-Digest"
 
 local _M = {}
 
-local resources = {
-    routes          = require("apisix.admin.routes"),
-    services        = require("apisix.admin.services"),
-    upstreams       = require("apisix.admin.upstreams"),
-    consumers       = require("apisix.admin.consumers"),
-    credentials     = require("apisix.admin.credentials"),
-    schema          = require("apisix.admin.schema"),
-    ssls            = require("apisix.admin.ssl"),
-    plugins         = require("apisix.admin.plugins"),
-    protos          = require("apisix.admin.proto"),
-    global_rules    = require("apisix.admin.global_rules"),
-    stream_routes   = require("apisix.admin.stream_routes"),
-    plugin_metadata = require("apisix.admin.plugin_metadata"),
-    plugin_configs  = require("apisix.admin.plugin_config"),
-    consumer_groups = require("apisix.admin.consumer_group"),
-    secrets         = require("apisix.admin.secrets"),
-}
 
-local function check_duplicate(item, key, id_set)
-    local identifier, identifier_type
-    if key == "consumers" then
-        identifier = item.id or item.username
-        identifier_type = item.id and "credential id" or "username"
-    else
-        identifier = item.id
-        identifier_type = "id"
-    end
+-- the "config" key in the standalone-config shared dict stores
+-- "<digest length>\n<digest><json body>" instead of plain JSON, so a worker
+-- can compare digests without decoding the (potentially large) JSON on
+-- every poll
+-- the reason for combining them into a single string and writing them to
+-- only one key is to ensure concurrent safety for updates by multiple
+-- workers
+local CONFIG_DIGEST_LENGTH_SEPARATOR = "\n"
 
-    if id_set[identifier] then
-        return true, "found duplicate " .. identifier_type .. " " .. identifier .. " in " .. key
-    end
-    id_set[identifier] = true
-    return false
+local function encode_config(digest, raw)
+    digest = digest or ""
+    return #digest .. CONFIG_DIGEST_LENGTH_SEPARATOR .. digest .. raw
 end
 
+
+local function decode_config(stored)
+    local idx = str_find(stored, CONFIG_DIGEST_LENGTH_SEPARATOR, 1, true)
+    if not idx then
+        return nil, nil, "missing digest length prefix"
+    end
+
+    local digest_len = tonumber(str_sub(stored, 1, idx - 1))
+    if not digest_len then
+        return nil, nil, "invalid digest length prefix"
+    end
+
+    local digest_start = idx + 1
+    local digest_end = digest_start + digest_len - 1
+    return str_sub(stored, digest_start, digest_end), str_sub(stored, digest_end + 1)
+end
+
+
 local function get_config()
-    local config = shared_dict:get("config")
-    if not config then
+    local stored = shared_dict:get("config")
+    if not stored then
         return nil, NOT_FOUND_ERR
     end
 
-    local err
-    config, err = core.json.decode(config)
+    local _, raw, err = decode_config(stored)
+    if not raw then
+        return nil, "failed to decode stored config: " .. err
+    end
+
+    local config
+    config, err = core.json.decode(raw)
     if not config then
         return nil, "failed to decode json: " .. err
     end
@@ -107,7 +107,7 @@ local function get_config()
 end
 
 
-local function update_and_broadcast_config(apisix_yaml)
+local function update_config(apisix_yaml)
     local raw, err = core.json.encode(apisix_yaml)
     if not raw then
         core.log.error("failed to encode json: ", err)
@@ -116,45 +116,141 @@ local function update_and_broadcast_config(apisix_yaml)
 
     if shared_dict then
         -- the worker that handles Admin API calls is responsible for writing the shared dict
-        local ok, err = shared_dict:set("config", raw)
+        local stored = encode_config(apisix_yaml[METADATA_DIGEST], raw)
+        local ok, err = shared_dict:set("config", stored)
         if not ok then
             return nil, "failed to save config to shared dict: " .. err
         end
-        core.log.info("standalone config updated: ", raw)
+        -- the payload is a full declarative configuration and can carry TLS
+        -- private keys and plugin credentials; log its size, not its contents
+        core.log.info("standalone config updated, size: ", #raw)
     else
         core.log.crit(config_yaml.ERR_NO_SHARED_DICT)
     end
-    return events:post(EVENT_UPDATE, EVENT_UPDATE)
+    return true
 end
 
-local function check_conf(checker, schema, item, typ)
-    if not checker then
-        return true
+local validate_configuration = config_validate.validate_configuration
+
+
+local MAX_WAIT_MS = 60000
+local POLL_INTERVAL = 0.05
+
+
+local function parse_wait_ms(ctx)
+    local args = core.request.get_uri_args(ctx)
+    local wait = args and tonumber(args.wait)
+    if not wait or wait <= 0 then
+        return 0
     end
-    local str_id = tostring(item.id)
-    if typ == "consumers" and
-        core.string.find(str_id, "/credentials/") then
-        local credential_checker = resources.credentials.checker
-        local credential_schema = resources.credentials.schema
-        return credential_checker(item.id, item, false, credential_schema, {
-            skip_references_check = true,
-        })
+    if wait > MAX_WAIT_MS then
+        return MAX_WAIT_MS
+    end
+    return wait
+end
+
+
+-- Some resource types (e.g. /protos) only get a config.new() instance
+-- when their owning plugin is enabled, so all_workers_applied can't wait
+-- on a key that will never be reported. Records which keys this subsystem
+-- actually has, as one comma-joined shdict value; rewritten every poll
+-- tick so it self-heals after LRU eviction or a plugin toggled by reload.
+local function mark_tracked_resources()
+    if not status_shared_dict then
+        return
+    end
+    local tracked = {}
+    for key in pairs(ALL_RESOURCE_KEYS) do
+        if config_yaml.fetch_created_obj("/" .. key) then
+            tracked[#tracked + 1] = key
+        end
+    end
+    local ok, err = status_shared_dict:set("tracked:" .. subsystem, table_concat(tracked, ","))
+    if not ok then
+        core.log.error("failed to mark tracked resources: ", err)
+    end
+end
+
+
+local function tracked_resource_set(subsystem_name)
+    local raw = status_shared_dict:get("tracked:" .. subsystem_name)
+    local set = {}
+    if raw then
+        for key in str_gmatch(raw, "[^,]+") do
+            set[key] = true
+        end
+    end
+    return set
+end
+
+
+local function all_workers_applied(target_digest)
+    if not status_shared_dict then
+        return false
     end
 
-    local secret_type
-    if typ == "secrets" then
-        local idx = str_find(str_id or "", "/")
-        if not idx then
-            return false, {
-                error_msg = "invalid secret id: " .. (str_id or "")
-            }
+    local n = worker_count()
+    local check_stream = config_local.is_stream_enabled()
+    local http_tracked = tracked_resource_set("http")
+    local stream_tracked = check_stream and tracked_resource_set("stream")
+    for key in pairs(ALL_RESOURCE_KEYS) do
+        for id = 0, n - 1 do
+            if http_tracked[key] then
+                local http_key = "worker:" .. id .. ":http:" .. key
+                local digest = status_shared_dict:get(http_key)
+                if digest ~= target_digest then
+                    core.log.debug("not yet applied: ", http_key, " has ", digest,
+                                    ", want ", target_digest)
+                    return false
+                end
+            end
+            if check_stream and stream_tracked and stream_tracked[key] then
+                local stream_key = "worker:" .. id .. ":stream:" .. key
+                local digest = status_shared_dict:get(stream_key)
+                if digest ~= target_digest then
+                    core.log.debug("not yet applied: ", stream_key, " has ", digest,
+                                    ", want ", target_digest)
+                    return false
+                end
+            end
         end
-        secret_type = str_sub(str_id, 1, idx - 1)
     end
-    return checker(item.id, item, false, schema, {
-        secret_type = secret_type,
-        skip_references_check = true,
-    })
+    return true
+end
+
+
+-- reads standalone-config shdict once and applies it if present
+local function try_restore_from_shared_dict()
+    if not shared_dict then
+        core.log.crit(config_yaml.ERR_NO_SHARED_DICT)
+        return nil, config_yaml.ERR_NO_SHARED_DICT
+    end
+
+    local stored, err = shared_dict:get("config")
+    if not stored then
+        if err then -- if the key does not exist, the return values are both nil
+            core.log.error("failed to read config from shared dict: ", err)
+        end
+        core.log.info("no config found in shared dict")
+        return true
+    end
+    -- the payload can carry TLS private keys and plugin credentials
+    core.log.info("startup config loaded from shared dict, size: ", #stored)
+
+    local _, raw, err = decode_config(tostring(stored))
+    if not raw then
+        return nil, "failed to decode config from shared dict: " .. err
+    end
+
+    local config
+    config, err = core.json.decode(raw)
+    if not config then
+        return nil, "failed to decode config from shared dict: " .. err
+    end
+    config_yaml._update_config(config)
+    core.log.info("config loaded from shared dict")
+
+    return true
 end
 
 
@@ -181,27 +277,30 @@ local function update(ctx)
     -- parse the request body
     local data
     if core.string.has_prefix(content_type, "application/yaml") then
-        data = yaml.load(req_body, { all = false })
-        if not data or type(data) ~= "table" then
+        local ok, result = pcall(yaml.load, req_body, { all = false })
+        -- a null document (`~`) loads as lyaml's sentinel table, which would
+        -- otherwise pass as an empty object and clear every resource
+        if not ok or type(result) ~= "table" or result == yaml.null then
             err = "invalid yaml request body"
+        else
+            data = result
         end
     else
         data, err = core.json.decode(req_body)
     end
     if err then
-        core.log.error("invalid request body: ", req_body, " err: ", err)
-        core.response.exit(400, {error_msg = "invalid request body: " .. err})
+        -- same reason as above: the body is the configuration itself
+        core.log.error("invalid request body, err: ", err)
+        return core.response.exit(400, {error_msg = "invalid request body: " .. err})
     end
     req_body = data
 
     local config, err = get_config()
-    if not config then
-        if err ~= NOT_FOUND_ERR then
-            core.log.error("failed to get config from shared dict: ", err)
-            return core.response.exit(500, {
-                error_msg = "failed to get config from shared dict: " .. err
-            })
-        end
+    if err and err ~= NOT_FOUND_ERR then
+        core.log.error("failed to get config from shared dict: ", err)
+        return core.response.exit(500, {
+            error_msg = "failed to get config from shared dict: " .. err
+        })
     end
 
     -- if the client passes in the same digest, the configuration is not updated
@@ -211,58 +310,35 @@ local function update(ctx)
         return core.response.exit(204)
     end
 
-    -- check input by jsonschema
+    local valid, error_msg = validate_configuration(req_body, false)
+    if not valid then
+        return core.response.exit(400, { error_msg = error_msg })
+    end
+
+    -- check input by jsonschema and build the final config
     local apisix_yaml = {}
 
     for key, conf_version_key in pairs(ALL_RESOURCE_KEYS) do
         local conf_version = config and config[conf_version_key] or 0
         local items = req_body[key]
         local new_conf_version = req_body[conf_version_key]
-        local resource = resources[key] or {}
-        if not new_conf_version then
-            new_conf_version = conf_version + 1
-        else
-            if type(new_conf_version) ~= "number" then
-                return core.response.exit(400, {
-                    error_msg = conf_version_key .. " must be a number",
-                })
-            end
+
+        if new_conf_version then
             if new_conf_version < conf_version then
                 return core.response.exit(400, {
                     error_msg = conf_version_key ..
                         " must be greater than or equal to (" .. conf_version .. ")",
                 })
             end
+        else
+            new_conf_version = conf_version + 1
         end
-
 
         apisix_yaml[conf_version_key] = new_conf_version
         if new_conf_version == conf_version then
             apisix_yaml[key] = config and config[key]
         elseif items and #items > 0 then
-            apisix_yaml[key] = table_new(#items, 0)
-            local item_schema = resource.schema
-            local item_checker = resource.checker
-            local id_set = {}
-
-            for index, item in ipairs(items) do
-                local item_temp = tbl_deepcopy(item)
-                local valid, err = check_conf(item_checker, item_schema, item_temp, key)
-                if not valid then
-                    local err_prefix = "invalid " .. key .. " at index " .. (index - 1) .. ", err: "
-                    local err_msg = type(err) == "table" and err.error_msg or err
-                    core.response.exit(400, { error_msg = err_prefix .. err_msg })
-                end
-                -- prevent updating resource with the same ID
-                -- (e.g., service ID or other resource IDs) in a single request
-                local duplicated, err = check_duplicate(item, key, id_set)
-                if duplicated then
-                    core.log.error(err)
-                    core.response.exit(400, { error_msg = err })
-                end
-
-                table_insert(apisix_yaml[key], item)
-            end
+            apisix_yaml[key] = items
         end
     end
 
@@ -270,16 +346,36 @@ local function update(ctx)
     apisix_yaml[METADATA_LAST_MODIFIED] = ngx_time()
     apisix_yaml[METADATA_DIGEST] = digest
 
-    local ok, err = update_and_broadcast_config(apisix_yaml)
+    local ok, err = update_config(apisix_yaml)
     if not ok then
-        core.response.exit(500, err)
+        return core.response.exit(500, err)
+    end
+    local ok, err = events:post(EVENT_UPDATE, EVENT_UPDATE)
+    if not ok then
+        -- event broadcasting errors are tolerable because each worker has
+        -- an additional timer as a backup. This may introduce some extra
+        -- latency, but it won't prevent the configuration from being updated
+        core.log.error("failed to post update event: ", err)
     end
 
     core.response.set_header(METADATA_LAST_MODIFIED, apisix_yaml[METADATA_LAST_MODIFIED])
     core.response.set_header(METADATA_DIGEST, apisix_yaml[METADATA_DIGEST])
+
+    local wait_ms = parse_wait_ms(ctx)
+    if wait_ms <= 0 then
+        return core.response.exit(202)
+    end
+
+    local deadline = ngx_now() + wait_ms / 1000
+    while not exiting() and ngx_now() < deadline do
+        if all_workers_applied(digest) then
+            return core.response.exit(200)
+        end
+        ngx_sleep(POLL_INTERVAL)
+    end
+
     return core.response.exit(202)
 end
-
 
 local function get(ctx)
     local accept = core.request.header(nil, "accept") or "application/json"
@@ -288,9 +384,9 @@ local function get(ctx)
     local config, err = get_config()
     if not config then
         if err ~= NOT_FOUND_ERR then
-            core.log.error("failed to get config from shared dict: ", err)
+            core.log.error("failed to get config from shared_dict: ", err)
             return core.response.exit(500, {
-                error_msg = "failed to get config from shared dict: " .. err
+                error_msg = "failed to get config from shared_dict: " .. err
             })
         end
         config = {}
@@ -330,14 +426,13 @@ local function get(ctx)
     return core.response.exit(200, resp)
 end
 
-
 local function head(ctx)
     local config, err = get_config()
     if not config then
         if err ~= NOT_FOUND_ERR then
-            core.log.error("failed to get config from shared dict: ", err)
+            core.log.error("failed to get config from shared_dict: ", err)
             return core.response.exit(500, {
-                error_msg = "failed to get config from shared dict: " .. err
+                error_msg = "failed to get config from shared_dict: " .. err
             })
         end
     end
@@ -347,20 +442,28 @@ local function head(ctx)
     return core.response.exit(200)
 end
 
-
 function _M.run()
     local ctx = ngx.ctx.api_ctx
     local method = str_lower(get_method())
     if method == "put" then
         return update(ctx)
-    elseif method == "head" then
-        return head(ctx)
-    else
-        return get(ctx)
     end
+
+    if method == "post" then
+        local path = ctx.var.uri
+        if path == "/apisix/admin/configs/validate" then
+            return config_validate.validate()
+        else
+            return core.response.exit(404, {error_msg = "Not found"})
+        end
+    end
+
+    if method == "head" then
+        return head(ctx)
+    end
+
+    return get(ctx)
 end
-
-
 local patch_schema
 do
     local resource_schema = {
@@ -413,6 +516,16 @@ end
 
 
 function _M.init_worker()
+    mark_tracked_resources()
+
+    local ok, err = try_restore_from_shared_dict()
+    if not ok then
+        core.log.error("failed to restore config from shared dict: ", err)
+
+        -- this occurs only when invalid data is stored in shdict
+        -- if the restore fails, wait for the next timer to retry
+    end
+
     local function update_config(config)
         if not config then
             local err
@@ -423,30 +536,53 @@ function _M.init_worker()
             end
         end
 
-        -- remove metadata key in-place
-        -- this table is generated by json decode, so there is no need to clone it
-        config[METADATA_LAST_MODIFIED] = nil
-        config[METADATA_DIGEST] = nil
         config_yaml._update_config(config)
     end
     events:register(update_config, EVENT_UPDATE, EVENT_UPDATE)
 
     -- due to the event module can not broadcast events between http and stream subsystems,
     -- we need to poll the shared dict to keep the config in sync
-    local last_modified_per_worker
-    timer_every(1, function ()
+    -- The timestamp only has second resolution, so two updates landing in the
+    -- same second are indistinguishable by it and the later one would never
+    -- reach this worker. The digest changes with the content, so compare both.
+    local last_modified_per_worker, digest_per_worker
+    timer_every(0.2, function ()
         if not exiting() then
-            local config, err = get_config()
-            if not config then
-                if err ~= NOT_FOUND_ERR then
+            mark_tracked_resources()
+
+            if not shared_dict then
+                return
+            end
+
+            local stored, err = shared_dict:get("config")
+            if not stored then
+                if err then -- if the key does not exist, the return values are both nil
                     core.log.error("failed to get config: ", err)
                 end
-            else
-                local last_modified = config[METADATA_LAST_MODIFIED]
-                if last_modified_per_worker ~= last_modified then
-                    update_config(config)
-                    last_modified_per_worker = last_modified
-                end
+                return
+            end
+
+            -- the digest prefix is cheap to check (no full-config decode), so
+            -- most ticks can bail out here without ever calling json.decode
+            local latest_digest, raw = decode_config(stored)
+            if latest_digest == digest_per_worker then
+                return
+            end
+
+            local config
+            config, err = core.json.decode(raw)
+            if not config then
+                core.log.error("failed to decode config: ", err)
+                return
+            end
+
+            local last_modified = config[METADATA_LAST_MODIFIED]
+            local digest = config[METADATA_DIGEST]
+            if last_modified_per_worker ~= last_modified
+               or digest_per_worker ~= digest then
+                update_config(config)
+                last_modified_per_worker = last_modified
+                digest_per_worker = digest
             end
         end
     end)

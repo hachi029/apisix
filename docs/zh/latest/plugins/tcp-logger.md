@@ -40,7 +40,7 @@ description: 本文介绍了 API 网关 Apache APISIX 如何使用 tcp-logger �
 | host             | string  | 是     |        |         | TCP 服务器的 IP 地址或主机名。                     |
 | port             | integer | 是     |        | [0,...] | 目标端口。                                        |
 | timeout          | integer | 否     | 1000   | [1,...] | 发送数据超时间。                                   |
-| log_format       | object  | 否   |          |         | 以 JSON 格式的键值对来声明日志格式。对于值部分，仅支持字符串。如果是以 `$` 开头，则表明是要获取 [APISIX 变量](../apisix-variable.md) 或 [NGINX 内置变量](http://nginx.org/en/docs/varindex.html)。 |
+| log_format       | object  | 否   |          |         | 日志格式以 JSON 的键值对声明。值支持字符串和嵌套对象（最多五层，超出部分将被截断）。字符串中可通过在前面加上 `$` 来引用 [APISIX 变量](../apisix-variable.md) 或 [NGINX 内置变量](http://nginx.org/en/docs/varindex.html)。 |
 | tls              | boolean | 否     | false  |         | 用于控制是否执行 SSL 验证。                        |
 | tls_options      | string  | 否     |        |         | TLS 选项。                                        |
 | include_req_body | boolean | 否     |        | [false, true] | 当设置为 `true` 时，日志中将包含请求体。           |
@@ -94,9 +94,8 @@ description: 本文介绍了 API 网关 Apache APISIX 如何使用 tcp-logger �
 
 | 名称             | 类型    | 必选项 | 默认值        | 有效值  | 描述                                             |
 | ---------------- | ------- | ------ | ------------- | ------- | ------------------------------------------------ |
-| log_format       | object  | 否    |  |         | 以 JSON 格式的键值对来声明日志格式。对于值部分，仅支持字符串。如果是以 `$` 开头。则表明获取 [APISIX 变量](../apisix-variable.md) 或 [NGINX 内置变量](http://nginx.org/en/docs/varindex.html)。 |
-| max_pending_entries | integer | 否 | | | 在批处理器中开始删除待处理条目之前可以购买的最大待处理条目数。|
-
+| log_format       | object  | 否    |  |         | 日志格式以 JSON 的键值对声明。值支持字符串和嵌套对象（最多五层，超出部分将被截断）。字符串中可通过在前面加上 `$` 来引用 [APISIX 变量](../apisix-variable.md) 或 [NGINX 内置变量](http://nginx.org/en/docs/varindex.html)。 |
+| max_pending_entries | integer | 否 | 8192 | >= 1 | 待处理条目数的上限。积压超过该值后新条目会被丢弃，避免日志服务变慢或不可达时 worker 内存无限增长。该上限对应的内存开销参见 [批处理器](../batch-processor.md#限制积压条目数)。 |
 :::info 注意
 
 该设置全局生效。如果指定了 `log_format`，则所有绑定 `tcp-logger` 的路由或服务都将使用该日志格式。
@@ -122,7 +121,9 @@ curl http://127.0.0.1:9180/apisix/admin/plugin_metadata/tcp-logger \
     "log_format": {
         "host": "$host",
         "@timestamp": "$time_iso8601",
-        "client_ip": "$remote_addr"
+        "client_ip": "$remote_addr",
+        "request": { "method": "$request_method", "uri": "$request_uri" },
+        "response": { "status": "$status" }
     }
 }'
 ```
@@ -130,7 +131,7 @@ curl http://127.0.0.1:9180/apisix/admin/plugin_metadata/tcp-logger \
 配置完成后，你将在日志系统中看到如下类似日志：
 
 ```json
-{"@timestamp":"2023-01-09T14:47:25+08:00","route_id":"1","host":"localhost","client_ip":"127.0.0.1"}
+{"@timestamp":"2023-01-09T14:47:25+08:00","route_id":"1","host":"localhost","client_ip":"127.0.0.1","request":{"method":"GET","uri":"/hello"},"response":{"status":200}}
 ```
 
 ## 启用插件

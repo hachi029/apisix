@@ -54,7 +54,7 @@ deployment:
     admin:
         admin_key:
         - name: admin
-            key: edd1c9f034335f136f87ad84b625c8f1  # using fixed API token has security risk, please update it when you deploy to production environment
+            key: your-admin-key  # set a secure Admin API key; if left empty, APISIX will generate one during initialization and write it back to this file
             role: admin
         allow_admin:                    # http://nginx.org/en/docs/http/ngx_http_access_module.html#allow
             - 127.0.0.0/24
@@ -92,7 +92,7 @@ deployment:
   admin:
     admin_key:
     - name: admin
-      key: ${{ADMIN_KEY:=edd1c9f034335f136f87ad84b625c8f1}}
+      key: ${{ADMIN_KEY:=your-admin-key}}
       role: admin
     allow_admin:
     - 127.0.0.0/24
@@ -101,7 +101,7 @@ deployment:
       port: 9180
 ```
 
-This will find the environment variable `ADMIN_KEY` first, and if it does not exist, it will use `edd1c9f034335f136f87ad84b625c8f1` as the default value.
+This will find the environment variable `ADMIN_KEY` first, and if it does not exist, it will use the fallback value you provided in the configuration.
 
 You can also specify environment variables in yaml keys. This is specifically useful in the `standalone` [mode](./deployment-modes.md#standalone) where you can specify the upstream nodes as follows:
 
@@ -335,8 +335,8 @@ ID's as a text string must be of a length between 1 and 64 characters and they s
 | PUT    | /apisix/admin/routes/{id}        | {...}        | Creates a Route with the specified id.                                                                                            |
 | POST   | /apisix/admin/routes             | {...}        | Creates a Route and assigns a random id.                                                                                            |
 | DELETE | /apisix/admin/routes/{id}        | NULL         | Removes the Route with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/routes/{id}        | {...}        | Updates the selected attributes of the specified, existing Route. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/routes/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                 |
+| PATCH | /apisix/admin/routes/{id}         | {...} | Standard PATCH, which modifies the specified attributes of the Route, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/routes/{id}/{path}  | {...} | Subpath PATCH, which specifies the Route attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### URI Request Parameters
 
@@ -368,7 +368,7 @@ ID's as a text string must be of a length between 1 and 64 characters and they s
 | plugin_config_id | False, can't be used with `script`       | Plugin      | [Plugin config](terminology/plugin-config.md) bound to the Route.                                                                                                                                                                                                                      |                                                      |
 | labels           | False                                    | Match Rules | Attributes of the Route specified as key-value pairs.                                                                                                                                                                                                                                          | {"version":"v2","build":"16","env":"production"}     |
 | timeout          | False                                    | Auxiliary   | Sets the timeout (in seconds) for connecting to, and sending and receiving messages between the Upstream and the Route. This will overwrite the `timeout` value configured in your [Upstream](#upstream).                                                                                                   | {"connect": 3, "send": 3, "read": 3}                 |
-| enable_websocket | False                                    | Auxiliary   | Enables a websocket. Set to `false` by default.                                                                                                                                                                                                                                                |                                                      |
+| enable_websocket | False                                    | Auxiliary   | Enables a websocket. Set to `false` by default. This is a plain protocol upgrade with no access to individual frames; see the note under Upstream [`scheme`](#upstream) if a plugin needs to inspect or rewrite them.                                                                        |                                                      |
 | status           | False                                    | Auxiliary   | Enables the current Route. Set to `1` (enabled) by default.                                                                                                                                                                                                                                    | `1` to enable, `0` to disable                        |
 
 Example configuration:
@@ -658,8 +658,8 @@ Service resource request address: /apisix/admin/services/{id}
 | PUT    | /apisix/admin/services/{id}        | {...}        | Creates a Service with the specified id.                                                                                            |
 | POST   | /apisix/admin/services             | {...}        | Creates a Service and assigns a random id.                                                                                            |
 | DELETE | /apisix/admin/services/{id}        | NULL         | Removes the Service with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/services/{id}        | {...}        | Updates the selected attributes of the specified, existing Service. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/services/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                   |
+| PATCH | /apisix/admin/services/{id}        | {...} | Standard PATCH, which modifies the specified attributes of the Service, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/services/{id}/{path} | {...} | Subpath PATCH, which specifies the Service attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 
@@ -671,7 +671,7 @@ Service resource request address: /apisix/admin/services/{id}
 | name             | False    | Auxiliary   | Identifier for the Service.                                                                                        | service-xxxx                                     |
 | desc             | False    | Auxiliary   | Description of usage scenarios.                                                                                    | service xxxx                                     |
 | labels           | False    | Match Rules | Attributes of the Service specified as key-value pairs.                                                            | {"version":"v2","build":"16","env":"production"} |
-| enable_websocket | False    | Auxiliary   | Enables a websocket. Set to `false` by default.                                                                    |                                                  |
+| enable_websocket | False    | Auxiliary   | Enables a websocket. Set to `false` by default. This is a plain protocol upgrade with no access to individual frames; see the note under Upstream [`scheme`](#upstream) if a plugin needs to inspect or rewrite them.  |                                                  |
 | hosts            | False    | Match Rules | Matches with any one of the multiple `host`s specified in the form of a non-empty list.                            | ["foo.com", "*.bar.com"]                         |
 
 Example configuration:
@@ -752,7 +752,7 @@ Example configuration:
 
     ```shell
     curl http://127.0.0.1:9180/apisix/admin/services/201 \
-    -H'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PATCH -i -d '
+    -H'X-API-KEY: your-admin-key' -X PATCH -i -d '
     {
         "upstream": {
             "nodes": {
@@ -780,7 +780,7 @@ Example configuration:
 
     ```shell
     curl http://127.0.0.1:9180/apisix/admin/services/201 \
-    -H'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PATCH -i -d '
+    -H'X-API-KEY: your-admin-key' -X PATCH -i -d '
     {
         "upstream": {
             "nodes": {
@@ -807,7 +807,7 @@ Example configuration:
 
     ```shell
     curl http://127.0.0.1:9180/apisix/admin/services/201/upstream/nodes \
-    -H'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PATCH -i -d '
+    -H'X-API-KEY: your-admin-key' -X PATCH -i -d '
     {
         "127.0.0.1:1982": 1
     }'
@@ -991,8 +991,8 @@ For notes on ID syntax please refer to: [ID Syntax](#quick-note-on-id-syntax)
 | PUT    | /apisix/admin/upstreams/{id}        | {...}        | Creates an Upstream with the specified id.                                                                                           |
 | POST   | /apisix/admin/upstreams             | {...}        | Creates an Upstream and assigns a random id.                                                                                           |
 | DELETE | /apisix/admin/upstreams/{id}        | NULL         | Removes the Upstream with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/upstreams/{id}        | {...}        | Updates the selected attributes of the specified, existing Upstream. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/upstreams/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                    |
+| PATCH | /apisix/admin/upstreams/{id}         | {...} | Standard PATCH, which modifies the specified attributes of the existing Upstream, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/upstreams/{id}/{path}  | {...} | Subpath PATCH, which specifies the Upstream attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 
@@ -1008,21 +1008,27 @@ In addition to the equalization algorithm selections, Upstream also supports pas
 | key                         | False                                                            | Match Rules                   | Only valid if the `type` is `chash`. Finds the corresponding node `id` according to `hash_on` and `key` values. When `hash_on` is set to `vars`, `key` is a required parameter and it supports [Nginx variables](http://nginx.org/en/docs/varindex.html). When `hash_on` is set as `header`, `key` is a required parameter, and `header name` can be customized. When `hash_on` is set to `cookie`, `key` is also a required parameter, and `cookie name` can be customized. When `hash_on` is set to `consumer`, `key` need not be set and the `key` used by the hash algorithm would be the authenticated `consumer_name`. | `uri`, `server_name`, `server_addr`, `request_uri`, `remote_port`, `remote_addr`, `query_string`, `host`, `hostname`, `arg_***`, `arg_***` |
 | checks                      | False                                                            | Health Checker                | Configures the parameters for the [health check](./tutorials/health-check.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |                                                                                                                                            |
 | retries                     | False                                                            | Integer                       | Sets the number of retries while passing the request to Upstream using the underlying Nginx mechanism. Set according to the number of available backend nodes by default. Setting this to `0` disables retry.                                                                                                                                                                                                                                                                                                                                                                                                                |                                                                                                                                            |
-| retry_timeout               | False                                                            | Integer                       | Timeout to continue with retries. Setting this to `0` disables the retry timeout.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                            |
+| retry_timeout               | False                                                            | Number                        | Timeout to continue with retries. Setting this to `0` disables the retry timeout.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                            |
 | timeout                     | False                                                            | Timeout                       | Sets the timeout (in seconds) for connecting to, and sending and receiving messages to and from the Upstream.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `{"connect": 0.5,"send": 0.5,"read": 0.5}`                                                                                                 |
 | name                        | False                                                            | Auxiliary                     | Identifier for the Upstream.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |                                                                                                                                            |
 | desc                        | False                                                            | Auxiliary                     | Description of usage scenarios.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                            |
 | pass_host                   | False                                                            | Enumeration                   | Configures the `host` when the request is forwarded to the upstream. Can be one of `pass`, `node` or `rewrite`. Defaults to `pass` if not specified. `pass`- transparently passes the client's host to the Upstream. `node`- uses the host configured in the node of the Upstream. `rewrite`- Uses the value configured in `upstream_host`.                                                                                                                                                                                                                                                                                  |                                                                                                                                            |
 | upstream_host               | False                                                            | Auxiliary                     | Specifies the host of the Upstream request. This is only valid if the `pass_host` is set to `rewrite`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |                                                                                                                                            |
-| scheme                      | False                                                            | Auxiliary                     | The scheme used when communicating with the Upstream. For an L7 proxy, this value can be one of `http`, `https`, `grpc`, `grpcs`. For an L4 proxy, this value could be one of `tcp`, `udp`, `tls`. Defaults to `http`.                                                                                                                                                                                                                                                                                                                                                                                                       |                                                                                                                                            |
+| scheme                      | False                                                            | Auxiliary                     | The scheme used when communicating with the Upstream. For an L7 proxy, this value can be one of `http`, `https`, `grpc`, `grpcs`, `ws`, `wss`. For an L4 proxy, this value could be one of `tcp`, `udp`, `tls`. Defaults to `http`.                                                                                                                                                                                                                                                                                                                                                                                           |                                                                                                                                            |
 | labels                      | False                                                            | Match Rules                   | Attributes of the Upstream specified as `key-value` pairs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | {"version":"v2","build":"16","env":"production"}                                                                                           |
 | tls.client_cert             | False, can't be used with `tls.client_cert_id`                   | HTTPS certificate             | Sets the client certificate while connecting to a TLS Upstream.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                            |
 | tls.client_key              | False, can't be used with `tls.client_cert_id`                   | HTTPS certificate private key | Sets the client private key while connecting to a TLS Upstream.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                            |
 | tls.client_cert_id          | False, can't be used with `tls.client_cert` and `tls.client_key` | SSL                           | Set the referenced [SSL](#ssl) id.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |                                                                                                                                            |
-| tls.verify                  | False, currently only kafka upstream is supported                | Boolean                       | Turn on server certificate verification, currently only kafka upstream is supported.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |                                                                                                                                            |
+| tls.verify                  | False                                                            | Boolean                       | Enables or disables verification of the Upstream certificate. Falls back to the nginx configuration when unset. Also used by the `kafka` scheme.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                            |
+| tls.ca_certs                | False                                                            | Array of HTTPS certificates   | CA certificates used to verify the Upstream certificate, replacing the ones loaded from `ssl_trusted_certificate`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                            |
 | keepalive_pool.size         | False                                                            | Auxiliary                     | Sets `keepalive` directive dynamically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |                                                                                                                                            |
 | keepalive_pool.idle_timeout | False                                                            | Auxiliary                     | Sets `keepalive_timeout` directive dynamically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |                                                                                                                                            |
 | keepalive_pool.requests     | False                                                            | Auxiliary                     | Sets `keepalive_requests` directive dynamically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |                                                                                                                                            |
+| warm_up_conf.slow_start_time_seconds | True, when `warm_up_conf` is set | Integer | Slow start window in seconds. A node the gateway observes for the first time takes a reduced share of the traffic and ramps back to its configured weight over this window. Must be at least 1. | 300 |
+| warm_up_conf.min_weight_percent | True, when `warm_up_conf` is set | Integer | Lowest effective weight during the ramp, as a percentage of the configured weight, from 1 to 100. | 1 |
+| warm_up_conf.interval | False | Integer | Seconds between two effective weight refreshes. Defaults to `1`, and cannot be greater than `slow_start_time_seconds`. | 1 |
+| warm_up_conf.aggression | False | Number | Shape of the ramp. `1` (default) is linear, above `1` ramps up faster at the beginning, below `1` slower. At least `0.01`. | 1 |
+| warm_up_conf.startup_grace_period_seconds | False | Integer | Seconds after the gateway starts during which a node observed for the first time is treated as already warmed up, so that a restart does not ramp the whole node set again. Defaults to `0`. | 180 |
 
 An Upstream can be one of the following `types`:
 
@@ -1040,6 +1046,11 @@ The following should be considered when setting the `hash_on` value:
 - When set to `consumer`, the `key` is optional and the key is set to the `consumer_name` captured from the authentication Plugin.
 - When set to `vars_combinations`, the `key` is required. The value of the key can be a combination of any of the [Nginx variables](http://nginx.org/en/docs/varindex.html) like `$request_uri$remote_addr`.
 
+APISIX supports proxying WebSocket connections in two different ways, and they don't combine:
+
+- Route or Service level [`enable_websocket`](#route) with an `http`/`https` Upstream `scheme`. This is a plain protocol upgrade: nginx's own `proxy_pass` forwards the raw TCP stream after the `101 Switching Protocols` handshake, and no plugin phase sees the individual WebSocket frames.
+- Upstream `scheme: ws` or `scheme: wss`. APISIX parses and proxies the WebSocket frames itself in both directions, which lets a plugin inspect or rewrite frames in flight through the `ws_handshake`, `ws_client_frame`, `ws_upstream_frame`, and `ws_close` phases. See the ["extra phase" section of the plugin development guide](./plugin-develop.md#extra-phase) for how to hook into them. `enable_websocket` is ignored on a Route or a Service whose Upstream uses this scheme, since the connection never reaches the `proxy_pass` path it configures.
+
 The features described below requires APISIX to be run on [APISIX-Runtime](./FAQ.md#how-do-i-build-the-apisix-runtime-environment):
 
 You can set the `scheme` to `tls`, which means "TLS over TCP".
@@ -1048,7 +1059,32 @@ To use mTLS to communicate with Upstream, you can use the `tls.client_cert/key` 
 
 Or you can reference SSL object by `tls.client_cert_id` to set SSL cert and key. The SSL object can be referenced only if the `type` field is `client`, otherwise the request will be rejected by APISIX. In addition, only `cert` and `key` will be used in the SSL object.
 
+To verify the certificate presented by the Upstream, set `tls.verify` to `true`. Leaving it unset keeps the behaviour configured in nginx, which is off unless `proxy_ssl_verify` is turned on. The certificate is checked against the CA certificates in `tls.ca_certs`, or against `ssl_trusted_certificate` from `config.yaml` when `tls.ca_certs` is not set:
+
+```json
+{
+  "scheme": "https",
+  "type": "roundrobin",
+  "nodes": {
+    "127.0.0.1:8443": 1
+  },
+  "tls": {
+    "verify": true,
+    "ca_certs": ["<content of ca.crt>"]
+  }
+}
+```
+
 To allow Upstream to have a separate connection pool, use `keepalive_pool`. It can be configured by modifying its child fields.
+
+`warm_up_conf` enables slow start for the nodes of a `roundrobin` Upstream. Whether a node is new is decided by the gateway itself, from the node set it observes, and the start of each ramp is recorded locally in the `upstream-slow-start` shared dict:
+
+- The node set an Upstream has when the gateway first builds a load balancer for it is treated as warmed up. So is the node set it already has when `warm_up_conf` is turned on.
+- A node added afterwards ramps from `min_weight_percent` back to its configured weight over `slow_start_time_seconds`. A node held out of the load balancer by a health check starts its ramp when it first becomes available.
+- A node that leaves the Upstream and comes back within `slow_start_time_seconds` resumes its ramp. One that comes back later, or that a health check kept out for longer than that, ramps again from the start.
+- Every APISIX instance ramps independently, from the moment it observed the node.
+
+`warm_up_conf` is only supported by `roundrobin` Upstreams whose nodes share a single priority, and it is rejected in the Upstreams of the `traffic-split` Plugin, which are rebuilt per request. Like the other Upstream fields that only apply to HTTP, it is ignored when the Upstream is used by a stream route. A ramp only shifts traffic between nodes: a single-node Upstream, or one whose nodes are all new, keeps sending every request to them.
 
 Example Configuration:
 
@@ -1125,7 +1161,7 @@ Example Configuration:
 
     ```shell
     curl http://127.0.0.1:9180/apisix/admin/upstreams/100 \
-    -H'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1' -X PATCH -i -d '
+    -H'X-API-KEY: your-admin-key' -X PATCH -i -d '
     {
         "nodes": {
             "127.0.0.1:1981": 10
@@ -1348,8 +1384,8 @@ Global Rule resource request address: /apisix/admin/global_rules/{id}
 | GET    | /apisix/admin/global_rules/{id}        | NULL         | Fetches specified Global Rule by id.                                                                                                |
 | PUT    | /apisix/admin/global_rules/{id}        | {...}        | Creates a Global Rule with the specified id.                                                                                        |
 | DELETE | /apisix/admin/global_rules/{id}        | NULL         | Removes the Global Rule with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/global_rules/{id}        | {...}        | Updates the selected attributes of the specified, existing Global Rule. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/global_rules/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                       |
+| PATCH | /apisix/admin/global_rules/{id}         | {...} | Standard PATCH, which modifies the specified attributes of the existing Global Rule, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/global_rules/{id}/{path}  | {...} | Subpath PATCH, which specifies the Global Rule attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 
@@ -1373,8 +1409,8 @@ Consumer group resource request address: /apisix/admin/consumer_groups/{id}
 | GET    | /apisix/admin/consumer_groups/{id}        | NULL         | Fetches specified Consumer group by id.                                                                                                |
 | PUT    | /apisix/admin/consumer_groups/{id}        | {...}        | Creates a new Consumer group with the specified id.                                                                                    |
 | DELETE | /apisix/admin/consumer_groups/{id}        | NULL         | Removes the Consumer group with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/consumer_groups/{id}        | {...}        | Updates the selected attributes of the specified, existing Consumer group. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/consumer_groups/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                         |
+| PATCH | /apisix/admin/consumer_groups/{id}         | {...} | Standard PATCH, which modifies the specified attributes of the existing Consumer Group, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/consumer_groups/{id}/{path}  | {...} | Subpath PATCH, which specifies the Consumer Group attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 
@@ -1401,8 +1437,8 @@ Plugin Config resource request address: /apisix/admin/plugin_configs/{id}
 | GET    | /apisix/admin/plugin_configs/{id}        | NULL         | Fetches specified Plugin config by id.                                                                                                |
 | PUT    | /apisix/admin/plugin_configs/{id}        | {...}        | Creates a new Plugin config with the specified id.                                                                                    |
 | DELETE | /apisix/admin/plugin_configs/{id}        | NULL         | Removes the Plugin config with the specified id.                                                                                      |
-| PATCH  | /apisix/admin/plugin_configs/{id}        | {...}        | Updates the selected attributes of the specified, existing Plugin config. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/plugin_configs/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                         |
+| PATCH | /apisix/admin/plugin_configs/{id}         | {...} | Standard PATCH, which modifies the specified attributes of the existing Plugin Config, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. Note that if an attribute is an array, it will be completely replaced. |
+| PATCH | /apisix/admin/plugin_configs/{id}/{path}  | {...} | Subpath PATCH, which specifies the Plugin Config attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 
@@ -1489,7 +1525,7 @@ The plugin can be filtered on subsystem so that the ({plugin_name}) is searched 
 
 ```shell
 curl "http://127.0.0.1:9180/apisix/admin/plugins/list" \
--H 'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1'
+-H 'X-API-KEY: your-admin-key'
 ```
 
 ```shell
@@ -1497,7 +1533,7 @@ curl "http://127.0.0.1:9180/apisix/admin/plugins/list" \
 ```
 
 ```shell
-curl "http://127.0.0.1:9180/apisix/admin/plugins/key-auth?subsystem=http" -H 'X-API-KEY: edd1c9f034335f136f87ad84b625c8f1'
+curl "http://127.0.0.1:9180/apisix/admin/plugins/key-auth?subsystem=http" -H 'X-API-KEY: your-admin-key'
 ```
 
 ```json
@@ -1563,8 +1599,8 @@ Secret resource request address: /apisix/admin/secrets/{secretmanager}/{id}
 | GET    | /apisix/admin/secrets/{manager}/{id} | NULL         | Fetches specified secrets by id.           |
 | PUT    | /apisix/admin/secrets/{manager}            | {...}        | Create new secrets configuration.                              |
 | DELETE | /apisix/admin/secrets/{manager}/{id} | NULL         | Removes the secrets with the specified id. |
-| PATCH  | /apisix/admin/secrets/{manager}/{id}        | {...}        | Updates the selected attributes of the specified, existing secrets. To delete an attribute, set value of attribute set to null. |
-| PATCH  | /apisix/admin/secrets/{manager}/{id}/{path} | {...}        | Updates the attribute specified in the path. The values of other attributes remain unchanged.                                 |
+| PATCH | /apisix/admin/secrets/{manager}/{id}        | {...} | Standard PATCH, which modifies the specified attributes of the existing secret, while all other attributes remain unchanged. To delete an attribute, set its value to `null`. |
+| PATCH | /apisix/admin/secrets/{manager}/{id}/{path} | {...} | Subpath PATCH, which specifies the secret attribute to update via `{path}` and completely replaces that attribute’s data, while all other attributes remain unchanged. |
 
 ### Request Body Parameters
 

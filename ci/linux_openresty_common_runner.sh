@@ -50,6 +50,13 @@ do_install() {
     make utils
 
     mkdir -p build-cache
+    # The test gRPC servers depend on golang.org/x/net v0.55.0, which requires
+    # Go >= 1.25 - newer than the job's Go (pinned to 1.17 for TinyGo/wasm).
+    # Provision a matching Go just for these builds without disturbing the rest.
+    pushd build-cache
+    wget -q https://golang.org/dl/go1.25.1.linux-amd64.tar.gz && tar -xf go1.25.1.linux-amd64.tar.gz
+    export PATH=$(pwd)/go/bin:$PATH
+    popd
     # install and start grpc_server_example
     cd t/grpc_server_example
 
@@ -92,7 +99,7 @@ script() {
     start_sse_server_example
 
     # APISIX_ENABLE_LUACOV=1 PERL5LIB=.:$PERL5LIB prove -Itest-nginx/lib -r t
-    FLUSH_ETCD=1 TEST_EVENTS_MODULE=$TEST_EVENTS_MODULE prove --timer -Itest-nginx/lib -I./ -r $TEST_FILE_SUB_DIR | tee /tmp/test.result
+    FLUSH_ETCD=1 prove --timer -Itest-nginx/lib -I./ -r $TEST_FILE_SUB_DIR | tee /tmp/test.result
     fail_on_bailout /tmp/test.result
     rerun_flaky_tests /tmp/test.result
 }

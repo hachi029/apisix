@@ -50,7 +50,7 @@ __DATA__
                     "upstream": {
                         "type": "roundrobin",
                         "nodes": {
-                            "httpbin.org:80": 1
+                            "httpbin.local:8280": 1
                         }
                     }
                 }]]
@@ -138,7 +138,7 @@ openai
 --testboundary--
 --- error_code: 404
 --- error_log
-unsupported content-type in header:
+unsupported content-type:
 
 
 

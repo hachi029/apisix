@@ -24,8 +24,8 @@ install_dependencies() {
     # install build & runtime deps
     yum install -y --disablerepo=* --enablerepo=ubi-8-appstream-rpms --enablerepo=ubi-8-baseos-rpms \
     wget tar gcc gcc-c++ automake autoconf libtool make unzip git sudo openldap-devel hostname patch \
-    which ca-certificates pcre pcre-devel xz \
-    openssl-devel
+    which ca-certificates pcre pcre-devel pcre2 pcre2-devel xz \
+    openssl-devel libxml2-devel libxslt-devel
     yum install -y libyaml-devel
     yum install -y --disablerepo=* --enablerepo=ubi-8-appstream-rpms --enablerepo=ubi-8-baseos-rpms cpanminus perl
 
@@ -61,11 +61,11 @@ install_dependencies() {
     # install test::nginx
     cpanm --notest Test::Nginx IPC::Run > build.log 2>&1 || (cat build.log && exit 1)
 
-    # add go1.15 binary to the path
+    # add go binary to the path
     mkdir build-cache
     pushd build-cache/
-    # Go is required inside the container.
-    wget -q https://golang.org/dl/go1.17.linux-amd64.tar.gz && tar -xf go1.17.linux-amd64.tar.gz
+    # Go is required inside the container to build the test gRPC servers.
+    wget -q https://golang.org/dl/go1.25.1.linux-amd64.tar.gz && tar -xf go1.25.1.linux-amd64.tar.gz
     export PATH=$PATH:$(pwd)/go/bin
     popd
     # install and start grpc_server_example
@@ -101,7 +101,7 @@ run_case() {
     make init
     set_coredns
     # run test cases
-    FLUSH_ETCD=1 TEST_EVENTS_MODULE=$TEST_EVENTS_MODULE prove --timer -Itest-nginx/lib -I./ -r ${TEST_FILE_SUB_DIR} | tee /tmp/test.result
+    FLUSH_ETCD=1 prove --timer -Itest-nginx/lib -I./ -r ${TEST_FILE_SUB_DIR} | tee /tmp/test.result
     fail_on_bailout /tmp/test.result
     rerun_flaky_tests /tmp/test.result
 }
