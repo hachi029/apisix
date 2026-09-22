@@ -90,7 +90,7 @@ t/node_modules/
 # release tar package
 *.tgz
 release/*
-
+deps
 
 # files produced when running the test suite locally; never commit these
 # redis snapshot from a locally run redis-server (limit-* tests)

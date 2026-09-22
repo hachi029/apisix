@@ -36,6 +36,7 @@ function _M:set(key, obj, ttl)
         return nil, "invalid cache_zone provided"
     end
 
+    -- shdict 必须进行序列化
     local obj_json = core.json.encode(obj)
     if not obj_json then
         return nil, "could not encode object"

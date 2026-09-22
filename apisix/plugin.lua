@@ -20,6 +20,7 @@ local config_util   = require("apisix.core.config_util")
 local enable_debug  = require("apisix.debug").enable_debug
 local wasm          = require("apisix.wasm")
 local expr          = require("resty.expr.v1")
+local apisix_ssl    = require("apisix.ssl")
 local secret        = require("apisix.secret")
 
 local ngx           = ngx
@@ -43,7 +44,7 @@ local tracer    = require("apisix.tracer")
 -- luacheck: globals load, ignore lua_load
 local lua_load          = load
 local is_http       = ngx.config.subsystem == "http"
--- 已加载的插件
+-- 已加载的插件, 元素为require("apisix.plugins." .. name)返回的插件对象，参考方法_M.load(config)
 local local_plugins = core.table.new(32, 0)
 -- 插件名称与插件的映射，key为plugin.name,value为require 返回的实例。记录了已经加载的插件
 local local_plugins_hash    = core.table.new(0, 32)
@@ -133,6 +134,7 @@ local _M = {
 }
 
 
+-- 读取配置conf/config.yaml 中的plugin_attr.plugin_name
 local function plugin_attr(name)
     -- TODO: get attr from synchronized data
     local local_conf = core.config.local_conf()
@@ -165,21 +167,12 @@ local function check_disable(plugin_conf)
     return plugin_conf._meta.disable
 end
 
-
-local function warn_unavailable_plugin(name, plugin_conf)
-    if check_disable(plugin_conf) ~= true then
-        core.log.warn("plugin [", name, "] is not enabled and will be skipped")
-    end
-end
--- exposed for callers that must not act on a plugin config which never runs,
--- such as the control API reporting the health checkers a plugin owns
-_M.check_disable = check_disable
-
 local PLUGIN_TYPE_HTTP = 1
 local PLUGIN_TYPE_STREAM = 2
 local PLUGIN_TYPE_HTTP_WASM = 3
 -- unload插件，如果插件有destroy方法，执行之，并将其从已加载模块中移除 package.loaded[plugin] = nil
 local function unload_plugin(name, plugin_type)
+    -- 如果是wasm类型插件，直接返回
     if plugin_type == PLUGIN_TYPE_HTTP_WASM then
         return
     end
@@ -194,16 +187,18 @@ local function unload_plugin(name, plugin_type)
         pkg_name = "apisix.stream.plugins." .. name
     end
 
+    -- 卸载old_plugin
     local old_plugin = pkg_loaded[pkg_name]
     if old_plugin and type(old_plugin.destroy) == "function" then
         old_plugin.destroy()
     end
 
+    -- package.loaded
     pkg_loaded[pkg_name] = nil
 end
 
--- name: 插件名称； plugins_list: 出参 {}；
--- require plugin ; 执行插件的init方法
+-- name: 插件名称； plugins_list: 出参 {}；plugin_type: wasm/http/stream
+-- 1.require "apisix.plugins." .. name ; 2.执行插件的init方法
 local function load_plugin(name, plugins_list, plugin_type)
     local ok, plugin
     --1. require plugin
@@ -265,17 +260,17 @@ local function load_plugin(name, plugins_list, plugin_type)
     end
 
     plugin.name = name
-    plugin.attr = plugin_attr(name) -- plugin_attr, apisix.cli.config.lua
+    -- 读取配置conf/config.yaml 中的配置项 plugin_attr.plugin_name
+    plugin.attr = plugin_attr(name)
     core.table.insert(plugins_list, plugin)
 
--- Don't initialize stream plugins in the HTTP subsystem.
+    -- Don't initialize stream plugins in the HTTP subsystem.
     -- The modules are loaded for schema validation (admin API),
     -- but init/workflow_handler functions must only run in the stream subsystem.
     if plugin_type == PLUGIN_TYPE_STREAM and is_http then
         return
     end
 
-    -- 插件初始化
     if plugin.init then
         plugin.init()
     end
@@ -318,12 +313,14 @@ local function load(plugin_names, wasm_plugin_names)
     core.table.clear(local_plugins)
     core.table.clear(local_plugins_hash)
 
+    -- 重新加载插件
     for name, value in pairs(processed) do
         local ty = PLUGIN_TYPE_HTTP
         if type(value) == "table" then
             ty = PLUGIN_TYPE_HTTP_WASM
             name = value
         end
+        -- 重新加载插件
         load_plugin(name, local_plugins, ty)
     end
 
@@ -431,8 +428,9 @@ local function get_plugin_names(config)
 end
 
 -- init_worker -> plugin.init_worker-> load
--- 加载插件
+-- 加载插件(会重新加载)
 function _M.load(config)
+    -- 从本地config.yaml里取出启用的插件名称
     local ignored, http_plugin_names, stream_plugin_names = get_plugin_names(config)
     if ignored then -- 传入的config中没有插件配置
         return local_plugins
@@ -446,7 +444,7 @@ function _M.load(config)
             if local_conf.wasm then
                 wasm_plugin_names = local_conf.wasm.plugins
             end
--- 加载http插件， 这里是reload, 如果插件已经被加载过，会重新加载
+            -- 加载http和wasm插件， 这里是reload, 如果插件已经被加载过，会重新加载
             local ok, err = load(http_plugin_names, wasm_plugin_names)
             if not ok then
                 core.log.error("failed to load plugins: ", err)
@@ -457,7 +455,7 @@ function _M.load(config)
     if not stream_plugin_names then
         core.log.warn("failed to read stream plugin list from local file")
     else
--- 加载stream http插件
+        -- 加载stream http插件
         local ok, err = load_stream(stream_plugin_names)
         if not ok then
             core.log.error("failed to load stream plugins: ", err)
@@ -469,6 +467,7 @@ function _M.load(config)
 end
 
 
+-- apisix.http_exit_worker() -> .
 function _M.exit_worker()
     for name, plugin in pairs(local_plugins_hash) do
         local ty = PLUGIN_TYPE_HTTP
@@ -487,66 +486,40 @@ function _M.exit_worker()
 end
 
 
--- Record an executed plugin phase function as "name#phase" in
--- ctx.debug_plugins, keeping the execution order. The entries collected
--- before the response header is sent are reported via the Apisix-Plugins
--- response header, the rest are logged as a warn log instead.
-local function trace_plugin_exec_for_debug(ctx, plugin_name, phase)
+-- 增加 Apisix-Plugins 响应头
+local function trace_plugins_info_for_debug(ctx, plugins)
     if not enable_debug() then
         return
     end
 
-    if not ctx then
-        return
-    end
-
-    local item = plugin_name .. "#" .. phase
-    local debug_plugins = ctx.debug_plugins
-    if not debug_plugins then
-        debug_plugins = core.table.new(4, 0)
-        ctx.debug_plugins = debug_plugins
-    else
-        -- a phase function may run more than once, e.g. the body_filter
-        -- one runs per response chunk, so record it only once
-        for i = 1, #debug_plugins do
-            if debug_plugins[i] == item then
-                return
-            end
-        end
-    end
-
-    core.table.insert(debug_plugins, item)
-
-    if not is_http or ngx.headers_sent then
-        core.log.warn("Apisix-Plugins: ", item)
-    end
-end
-
-
-local POST_RESP_HEADER_PHASES = {"body_filter", "delayed_body_filter", "log"}
--- The phase functions running after the response header is sent can not be
--- traced at execution time and reported in the Apisix-Plugins response
--- header. Instead, infer them from the filtered plugin list right before
--- the response header is generated: a plugin carrying such a phase function
--- is expected to execute it. The inferred entries may not fully match the
--- real execution, e.g. a plugin skipped at runtime by its `_meta.filter`
--- is still reported.
-function _M.trace_expected_plugins_for_debug(api_ctx)
-    if not enable_debug() then
-        return
-    end
-
-    local plugins = api_ctx.plugins
     if not plugins then
+        if is_http and not ngx.headers_sent then
+            core.response.add_header("Apisix-Plugins", "no plugin")
+        else
+            core.log.warn("Apisix-Plugins: no plugin")
+        end
+
         return
     end
 
-    for _, phase in ipairs(POST_RESP_HEADER_PHASES) do
-        for i = 1, #plugins, 2 do
-            if plugins[i][phase] then
-                trace_plugin_exec_for_debug(api_ctx, plugins[i].name, phase)
+    -- 存放所有插件的名称
+    local t = {}
+    for i = 1, #plugins, 2 do
+        core.table.insert(t, plugins[i].name)
+    end
+    if is_http and not ngx.headers_sent then
+        if ctx then
+            local debug_headers = ctx.debug_headers
+            if not debug_headers then
+                debug_headers = core.table.new(0, 5)
             end
+            for i, v in ipairs(t) do
+                debug_headers[v] = true
+            end
+            ctx.debug_headers = debug_headers
         end
+    else
+        core.log.warn("Apisix-Plugins: ", core.table.concat(t, ", "))
     end
 end
 
@@ -554,6 +527,7 @@ end
 -- 动态控制插件是否执行：https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E5%8A%A8%E6%80%81%E6%8E%A7%E5%88%B6%E6%8F%92%E4%BB%B6%E6%89%A7%E8%A1%8C%E7%8A%B6%E6%80%81
 local function meta_filter(ctx, plugin_name, plugin_conf)
     local filter = plugin_conf._meta and plugin_conf._meta.filter
+    -- 没配置filter
     if not filter then
         return true
     end
@@ -567,9 +541,11 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
 
     local ex, ok, err
     if ctx then
+        -- (key, version, create_obj_fun, ...)
         ex, err = expr_lrucache(plugin_name .. ctx.conf_type .. ctx.conf_id,
                                  ctx.conf_version, expr.new, filter)
     else
+        -- 构建expr
         ex, err = expr.new(filter)
     end
     if not ex then
@@ -577,6 +553,7 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
                          " plugin_name: ", plugin_name)
         return true
     end
+    -- 执行
     ok, err = ex:eval(ctx.var)
     if err then
         core.log.warn("failed to run the 'vars' expression: ", err,
@@ -584,37 +561,43 @@ local function meta_filter(ctx, plugin_name, plugin_conf)
         return true
     end
 
+    -- 缓存执行的值
     ctx[match_cache_key] = ok
     return ok
 end
 
 
 -- 主要对插件进行排序，过滤不需要执行的插件
--- conf: rule; plugins: 出参 {}， 返回的也是 plugins
+-- conf: rule; plugins: 出参 {}， 返回的也是 plugins.元素为每2个一组，第一个为require加载的插件对象，第二个为etcd上的插件配置
 -- conf可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
 function _M.filter(ctx, conf, plugins, route_conf, phase)
     local user_plugin_conf = conf.value.plugins
     -- 没有插件
     if user_plugin_conf == nil or
        core.table.nkeys(user_plugin_conf) == 0 then
+        trace_plugins_info_for_debug(nil, nil)
         -- when 'plugins' is given, always return 'plugins' itself instead
         -- of another one
         return plugins or core.tablepool.fetch("plugins", 0, 0)
     end
 
     local custom_sort = false
-    -- 路由上的插件
+    -- 路由上的插件. 要执行的插件都合并到route上了
     local route_plugin_conf = route_conf and route_conf.value.plugins
     plugins = plugins or core.tablepool.fetch("plugins", 32, 0)
+    -- local_plugins为已加载的插件
     for _, plugin_obj in ipairs(local_plugins) do
         local name = plugin_obj.name
+        -- 获取插件配置 plugin_conf,
         local plugin_conf = user_plugin_conf[name]
 
-        if type(plugin_conf) ~= "table" then  -- type(nil) = nil
+        -- type(nil) = nil
+        if type(plugin_conf) ~= "table" then
             goto continue
         end
 
-        if check_disable(plugin_conf) then    -- 检查plugin_conf._meta.disable
+        -- 检查plugin_conf._meta.disable
+        if check_disable(plugin_conf) then
             goto continue
         end
 
@@ -651,7 +634,10 @@ function _M.filter(ctx, conf, plugins, route_conf, phase)
         ::continue::
     end
 
--- 自定义插件优先级： https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%92%E4%BB%B6%E4%BC%98%E5%85%88%E7%BA%A7
+    -- 记录执行了哪些插件到ctx.debug_headers中
+    trace_plugins_info_for_debug(ctx, plugins)
+
+    -- 自定义插件优先级： https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%92%E4%BB%B6%E4%BC%98%E5%85%88%E7%BA%A7
     -- 所有插件都有默认优先级，但仍然可以通过 priority 配置项来自定义插件优先级，从而改变插件执行顺序。
     -- 只有设置了plugin_conf._meta.priority 才会执行
     -- 使用 plugin_conf._meta.priority 对插件进行重新排序，如果没配置这个字段，则使用插件默认的priority
@@ -709,6 +695,7 @@ function _M.stream_filter(user_route, plugins)
     plugins = plugins or core.table.new(#stream_local_plugins * 2, 0)
     local user_plugin_conf = user_route.value.plugins
     if user_plugin_conf == nil then
+        trace_plugins_info_for_debug(nil, nil)
         return plugins
     end
 
@@ -722,6 +709,8 @@ function _M.stream_filter(user_route, plugins)
             core.table.insert(plugins, plugin_conf)
         end
     end
+
+    trace_plugins_info_for_debug(nil, plugins)
 
     -- resolve $secret:// and $env:// references in stream plugin confs
     for i = 2, #plugins, 2 do
@@ -872,14 +861,7 @@ local function merge_consumer_route(route_conf, consumer_conf, consumer_group_co
         return route_conf
     end
 
-    -- some plugins cache request-time state on their conf object (resolved DNS
-    -- nodes, probed backend versions, ...). Deep-copying the plugin confs would
-    -- hand every consumer its own copy and drop that state, so keep them shared
-    -- by reference, as they already are on the route without consumer auth. The
-    -- `plugins` container itself is still a fresh table, so the merge below
-    -- overwrites its keys without touching the original route conf.
-    local new_route_conf = core.table.deepcopy(route_conf,
-        { shallow_prefix = "self.value.plugins" })
+    local new_route_conf = core.table.deepcopy(route_conf)
 
     if has_group_plugins then
         for name, conf in pairs(consumer_group_conf.value.plugins) do
@@ -901,7 +883,6 @@ local function merge_consumer_route(route_conf, consumer_conf, consumer_group_co
                 new_route_conf.value.plugins = {}
             end
 
-            -- 只在consumer上配置的插件.key-auth同时在consumer和router上配置，不满足条件
             if new_route_conf.value.plugins[name] == nil then
                 conf._from_consumer = true
             end
@@ -948,6 +929,7 @@ local init_plugins_syncer
 do
     local plugins_conf
 
+    -- apisix.http_init_worker() --> plugin.init_worker() --> .
     --  core.config.new("/plugins", opts) 启动任务watch etcd配置更新
     function init_plugins_syncer()
         local err
@@ -958,6 +940,7 @@ do
             filter = function(item)
                 -- we need to pass 'item' instead of plugins_conf because
                 -- the latter one is nil at the first run
+                -- (重新)加载插件
                 _M.load(item)
             end,
         })
@@ -984,10 +967,11 @@ function _M.init_prometheus()
 end
 
 
+-- apisix.http_init_worker() --> .
 function _M.init_worker()
     -- someone's plugin needs to be initialized after prometheus
     -- see https://github.com/apache/apisix/issues/3286
-    -- 根据conf.yaml里配置，加载插件，执行插件的init方法
+    -- 根据conf.yaml里配置，1.加载插件(require plugin)，2.执行插件的init方法
     _M.load()
 
     if local_conf and not local_conf.apisix.enable_admin then
@@ -1061,22 +1045,18 @@ end
 
 
 
-local function check_single_plugin_schema(name, plugin_conf, schema_type, skip_disabled_plugin,
-                                          ignore_disabled_plugin)
+local function check_single_plugin_schema(name, plugin_conf, schema_type, skip_disabled_plugin)
     if type(plugin_conf) ~= "table" then
         return false, "invalid plugin conf " ..
             core.json.encode(plugin_conf, true) ..
-            " for plugin [" .. tostring(name) .. "]"
+            " for plugin [" .. name .. "]"
     end
 
     local plugin_obj = local_plugins_hash[name]
     if not plugin_obj then
-        if ignore_disabled_plugin then
-            return true
-        end
-
         if skip_disabled_plugin then
-            warn_unavailable_plugin(name, plugin_conf)
+            core.log.warn("skipping check schema for disabled or unknown plugin [",
+                                    name, "]. Enable the plugin or modify configuration")
             return true
         else
             return false, "unknown plugin [" .. name .. "]"
@@ -1086,16 +1066,8 @@ local function check_single_plugin_schema(name, plugin_conf, schema_type, skip_d
     if plugin_obj.check_schema then
         local ok, err = plugin_obj.check_schema(plugin_conf, schema_type)
         if not ok then
-            if check_disable(plugin_conf) ~= true then
-                return false, "failed to check the configuration of plugin "
-                    .. name .. " err: " .. err
-            end
-
-            -- the plugin is disabled via _meta.disable so it will never be
-            -- executed: an environment dependent failure (e.g. proxy-cache
-            -- cache_zone not found on this node) must not invalidate the item
-            core.log.warn("failed to check the configuration of disabled plugin ",
-                          name, ", accepting it anyway")
+            return false, "failed to check the configuration of plugin "
+                .. name .. " err: " .. err
         end
 
         if plugin_conf._meta then
@@ -1181,7 +1153,7 @@ local function process_encrypt_field(conf, key_path, operation, plugin_name, op_
         end
 
         if type(val) == "string" then
-            local result, err = operation(val)
+            local result, err = operation(val, "data_encrypt")
             if not result then
                 log_func("failed to ", op_name, " the conf of plugin [",
                          plugin_name, "] key [", key_path, "], err: ", err, hint)
@@ -1194,7 +1166,7 @@ local function process_encrypt_field(conf, key_path, operation, plugin_name, op_
                 -- array of strings
                 for i, item in ipairs(val) do
                     if type(item) == "string" then
-                        local result, err = operation(item)
+                        local result, err = operation(item, "data_encrypt")
                         if not result then
                             log_func("failed to ", op_name, " the conf of plugin [",
                                      plugin_name, "] key [", key_path,
@@ -1208,7 +1180,7 @@ local function process_encrypt_field(conf, key_path, operation, plugin_name, op_
                 -- map of strings
                 for k, v in pairs(val) do
                     if type(v) == "string" then
-                        local result, err = operation(v)
+                        local result, err = operation(v, "data_encrypt")
                         if not result then
                             log_func("failed to ", op_name, " the conf of plugin [",
                                      plugin_name, "] key [", key_path,
@@ -1259,7 +1231,7 @@ local function decrypt_conf(name, conf, schema_type)
 
     if schema.encrypt_fields and not core.table.isempty(schema.encrypt_fields) then
         for _, key in ipairs(schema.encrypt_fields) do
-            process_encrypt_field(conf, key, core.data_encryption.decrypt, name, "decrypt")
+            process_encrypt_field(conf, key, apisix_ssl.aes_decrypt_pkey, name, "decrypt")
         end
     end
 end
@@ -1278,7 +1250,7 @@ local function encrypt_conf(name, conf, schema_type)
 
     if schema.encrypt_fields and not core.table.isempty(schema.encrypt_fields) then
         for _, key in ipairs(schema.encrypt_fields) do
-            process_encrypt_field(conf, key, core.data_encryption.encrypt, name, "encrypt")
+            process_encrypt_field(conf, key, apisix_ssl.aes_encrypt_pkey, name, "encrypt")
         end
     end
 end
@@ -1286,16 +1258,9 @@ _M.encrypt_conf = encrypt_conf
 
 
 check_plugin_metadata = function(item)
-    -- A plugin_metadata entry takes no effect until its plugin is enabled,
-    -- so entries of disabled or unknown plugins are ignored silently. This
-    -- also covers the entries of the other subsystem's plugins: the
-    -- plugin_metadata directory is watched by both the http and the stream
-    -- subsystems, while each of them only loads its own plugins.
     local ok, err = check_single_plugin_schema(item.id, item,
-                                               core.schema.TYPE_METADATA, false, true)
-    -- the schema of an unloaded plugin is unavailable, so decrypting its
-    -- metadata would only produce a "failed to get schema" warning
-    if ok and enable_gde() and local_plugins_hash[item.id] then
+                                               core.schema.TYPE_METADATA, true)
+    if ok and enable_gde() then
         decrypt_conf(item.id, item, core.schema.TYPE_METADATA)
     end
 
@@ -1330,7 +1295,6 @@ local function stream_check_schema(plugins_conf, schema_type, skip_disabled_plug
         local plugin_obj = stream_local_plugins_hash[name]
         if not plugin_obj then
             if skip_disabled_plugin then
-                warn_unavailable_plugin(name, plugin_conf)
                 goto CONTINUE
             else
                 return false, "unknown plugin [" .. name .. "]"
@@ -1340,13 +1304,8 @@ local function stream_check_schema(plugins_conf, schema_type, skip_disabled_plug
         if plugin_obj.check_schema then
             local ok, err = plugin_obj.check_schema(plugin_conf, schema_type)
             if not ok then
-                if check_disable(plugin_conf) ~= true then
-                    return false, "failed to check the configuration of "
-                                  .. "stream plugin [" .. name .. "]: " .. err
-                end
-
-                core.log.warn("failed to check the configuration of disabled ",
-                              "stream plugin [", name, "], accepting it anyway")
+                return false, "failed to check the configuration of "
+                              .. "stream plugin [" .. name .. "]: " .. err
             end
         end
 
@@ -1358,6 +1317,7 @@ end
 _M.stream_check_schema = stream_check_schema
 
 
+-- 传入core.config.new("/routes", opts) 的checker函数
 function _M.plugin_checker(item, schema_type)
     if item.plugins then
         if enable_gde() then
@@ -1378,9 +1338,7 @@ end
 
 function _M.stream_plugin_checker(item, in_cp)
     if item.plugins then
-        -- config_etcd passes the key as the second checker argument, so only
-        -- an explicit boolean marks validation on the control plane.
-        local skip_disabled_plugins = in_cp ~= true
+        local skip_disabled_plugins = not in_cp
         if core.config.type == "yaml" or core.config.type == "json" then
             skip_disabled_plugins = false
         end
@@ -1404,28 +1362,20 @@ local function run_meta_pre_function(conf, api_ctx, name)
     end
 end
 
--- mark a plugin to be skipped for the rest of the request, so a plugin run as
--- a workflow action does not run again in the normal plugin chain
-function _M.skip_plugin(ctx, plugin_name)
-    if not ctx._skip_plugins then
-        ctx._skip_plugins = {}
-    end
-    ctx._skip_plugins[plugin_name] = true
-end
-
-
 -- 这个方法主要逻辑是执行插件对应阶段的方法。还包括了执行meta_filter来判断插件是否需要执行、meta_pre_function 执行前置脚本
--- plugins 待执行的插件，已经排好序了
+-- plugins 待执行的插件，已经排好序了。元素为每2个一组，第一个为require加载的插件对象，第二个为etcd上的插件配置
 -- return api_ctx, plugin_run , 第二个参数标识是否有插件被执行了
 function _M.run_plugin(phase, plugins, api_ctx)
-    local plugin_run = false    -- 标识是否有插件被执行了
+    -- 标识是否有插件被执行了
+    local plugin_run = false
     api_ctx = api_ctx or ngx.ctx.api_ctx
     if not api_ctx then
         return
     end
 
     plugins = plugins or api_ctx.plugins
-    if not plugins or #plugins == 0 then  --没有插件
+    --没有插件
+    if not plugins or #plugins == 0 then
         return api_ctx
     end
 
@@ -1435,38 +1385,35 @@ function _M.run_plugin(phase, plugins, api_ctx)
         and phase ~= "body_filter"
         and phase ~= "delayed_body_filter"
     then
-        -- in the "rewrite_in_consumer" phase, the executed functions
-        -- are the "rewrite" ones
-        local exec_phase = phase == "rewrite_in_consumer" and "rewrite" or phase
-        for i = 1, #plugins, 2 do  --plugins[i] 插件实例require 'key-auth' ; plugins[i+1] 插件配置
+        --plugins[i] 插件实例require('apisix.plugins.key-auth') ; plugins[i+1] 为etcd上的插件配置
+        for i = 1, #plugins, 2 do
 
             if phase == "rewrite_in_consumer" and plugins[i + 1]._skip_rewrite_in_consumer then
                 goto CONTINUE
             end
 
-            local phase_func = plugins[i][exec_phase]
+            local phase_func = phase == "rewrite_in_consumer" and plugins[i]["rewrite"]
+                               or plugins[i][phase]
             if phase_func then
+                -- conf为为etcd上的插件配置
                 local conf = plugins[i + 1]
                 -- 执行plugin_conf._meta.filter, filter是一个表达式  {["arg_version", "==", "v2"]}
-                -- 动态控制插件是否执行
+                -- 执行plugin_conf._meta.filter, 动态控制插件是否执行
                 -- https://apisix.apache.org/zh/docs/apisix/terminology/plugin/#%E9%80%9A%E7%94%A8%E9%85%8D%E7%BD%AE
                 if not meta_filter(api_ctx, plugins[i]["name"], conf)then
                     goto CONTINUE
                 end
-                -- skip a plugin already run as a workflow action, before any meta hooks
-                if api_ctx._skip_plugins and api_ctx._skip_plugins[plugins[i]["name"]] then
-                    goto CONTINUE
-                end
-
                 -- 执行 conf._meta.pre_function
                 run_meta_pre_function(conf, api_ctx, plugins[i]["name"])
                 plugin_run = true
                 api_ctx._plugin_name = plugins[i]["name"]
-                trace_plugin_exec_for_debug(api_ctx, plugins[i]["name"], exec_phase)
                 local code, body = phase_func(conf, api_ctx) -- 执行插件方法
                 api_ctx._plugin_name = nil
-                if code or body then    --在请求转发到upstream之前的阶段，可以直接向客户端返回响应
+                --在请求转发到upstream之前的阶段，可以直接向客户端返回响应
+                -- 如果返回了code，body则直接向客户端发送响应
+                if code or body then
                     if is_http then
+                        -- http协议
                         if code >= 400 then
                             core.log.warn(plugins[i].name, " exits with http status code ", code)
 
@@ -1477,17 +1424,14 @@ function _M.run_plugin(phase, plugins, api_ctx)
                                 body = conf._meta.error_response
                             end
                         end
-
+                        -- 调用ngx.exit() https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxexit
+                        -- When status >= 200 (i.e., ngx.HTTP_OK and above), it will interrupt the execution of the current request and return status code to Nginx.
                         core.response.exit(code, body)
                     else
+                        -- 非http协议
                         if code >= 400 then
                             core.log.warn(plugins[i].name, " exits with status code ", code)
                         end
-
-                        -- a stream session is rejected by closing it, so the
-                        -- code never reaches $status; keep it for the log
-                        -- phase, which still runs after ngx_exit
-                        api_ctx.stream_rejected_code = code
 
                         ngx_exit(1)
                     end
@@ -1499,43 +1443,44 @@ function _M.run_plugin(phase, plugins, api_ctx)
         return api_ctx, plugin_run
     end
 
-    -- 以下是执行upstream返回请求后的相关逻辑
+    -- 以下是执行upstream返回请求后的相关逻辑（即phase为[log|header_filter|body_filter|delayed_body_filter]）
     for i = 1, #plugins, 2 do
         local phase_func = plugins[i][phase]
         local conf = plugins[i + 1]
         if phase_func and meta_filter(api_ctx, plugins[i]["name"], conf) then
-            -- skip a plugin already run as a workflow action, before any meta hooks
-            if api_ctx._skip_plugins and api_ctx._skip_plugins[plugins[i]["name"]] then
-                goto CONTINUE
-            end
             plugin_run = true
             run_meta_pre_function(conf, api_ctx, plugins[i]["name"])
             api_ctx._plugin_name = plugins[i]["name"]
-            trace_plugin_exec_for_debug(api_ctx, plugins[i]["name"], phase)
             local span = tracer.start(api_ctx.ngx_ctx, "apisix.phase." .. phase
                                         .. ".plugins." .. api_ctx._plugin_name)
             phase_func(conf, api_ctx)
             span:finish(api_ctx.ngx_ctx)
             api_ctx._plugin_name = nil
         end
-
-        ::CONTINUE::
     end
 
     return api_ctx, plugin_run
 end
 
+-- https://apisix.apache.org/zh/docs/apisix/admin-api/#plugin-metadata
+-- 这段逻辑主要设置插件的plugin_conf._meta.parent 字段
 function _M.set_plugins_meta_parent(plugins, parent)
     if not plugins then
         return
     end
+    -- 遍历每个插件
     for _, plugin_conf in pairs(plugins) do
+        -- 如果_meta为nil, 则进行初始化
         if not plugin_conf._meta then
             plugin_conf._meta = {}
         end
+        -- 设置plugin_conf._meta.parent
         if not plugin_conf._meta.parent then
+            --构造parent
             local parent_info = {
+                -- parent_key
                 resource_key = parent.key,
+                -- parent_conf_version
                 resource_version = tostring(parent.modifiedIndex)
             }
             local mt_table = getmetatable(plugin_conf._meta)
@@ -1581,14 +1526,13 @@ local function merge_global_rules(global_rules, conf_version)
         },
         createdIndex = conf_version,
         modifiedIndex = conf_version,
+        clean_handlers = {},
     }
 
     return dummy_global_rule
 end
 
 
--- https://apisix.apache.org/zh/docs/apisix/terminology/global-rule/
--- 一个global_rule可以包含多个插件
 function _M.run_global_rules(api_ctx, global_rules, conf_version, phase_name)
     if global_rules and #global_rules > 0 then
         local span_name = "run_global_rules." .. phase_name
@@ -1601,46 +1545,25 @@ function _M.run_global_rules(api_ctx, global_rules, conf_version, phase_name)
             api_ctx.global_rules = global_rules
         end
 
-        -- 一个global_rule可以包含多个插件 {"plugins":{{name:"limit-count"},{..}}}
         local dummy_global_rule = merge_global_rule_lrucache(conf_version,
                                                              global_rules,
                                                              merge_global_rules,
                                                              global_rules,
                                                              conf_version)
 
+        local plugins = core.tablepool.fetch("plugins", 32, 0)
         local route = api_ctx.matched_route
         api_ctx.conf_type = "global_rule"
         api_ctx.conf_version = dummy_global_rule.modifiedIndex
         api_ctx.conf_id = dummy_global_rule.value.id
 
-        -- The filtered set depends only on the merged global rule (itself cached
-        -- per conf_version) and on the matched route, so it does not need
-        -- recomputing in every phase. This matters most for body_filter, which
-        -- runs once per response buffer. Route plugins are already reused this
-        -- way through api_ctx.plugins; global rules were not.
-        -- The route is part of the key because plugins with
-        -- run_policy == "prefer_route" are skipped when the route configures the
-        -- same plugin, and api_ctx.matched_route is replaced when a consumer's
-        -- configuration is merged in -- which happens after the rewrite phase
-        -- has run but before access.
-        -- The table is returned to the pool in http_log_phase.
-        local plugins = api_ctx.global_plugins
-        if not (plugins
-                and api_ctx.global_plugins_route == route
-                and api_ctx.global_plugins_version == dummy_global_rule.modifiedIndex)
-        then
-            plugins = plugins or core.tablepool.fetch("global_plugins", 32, 0)
-            core.table.clear(plugins)
-            -- 对需要执行的插件进行排序，过滤不需要执行的插件
-            plugins = _M.filter(api_ctx, dummy_global_rule, plugins, route) -- 返回的也是入参plugins
-
-            api_ctx.global_plugins = plugins
-            api_ctx.global_plugins_route = route
-            api_ctx.global_plugins_version = dummy_global_rule.modifiedIndex
-        end
+        core.table.clear(plugins)
+        plugins = _M.filter(api_ctx, dummy_global_rule, plugins, route)
 
         _M.run_plugin(phase_name, plugins, api_ctx)
+        core.tablepool.release("plugins", plugins)
 
+        -- 恢复 conf_type/conf_version/conf_id
         api_ctx.conf_type = orig_conf_type
         api_ctx.conf_version = orig_conf_version
         api_ctx.conf_id = orig_conf_id
@@ -1664,7 +1587,6 @@ function _M.lua_response_filter(api_ctx, headers, body, no_flush, wait)
                 end
 
                 run_meta_pre_function(conf, api_ctx, plugins[i]["name"])
-                trace_plugin_exec_for_debug(api_ctx, plugins[i]["name"], "lua_body_filter")
                 local code, new_body = phase_func(conf, api_ctx, headers, body)
                 if code then
                     if code ~= ngx_ok then

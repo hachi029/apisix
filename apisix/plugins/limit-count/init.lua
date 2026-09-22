@@ -536,6 +536,7 @@ local function run_rate_limit(conf, rule, ctx, name, cost, dry_run)
         key = ctx.var["remote_addr"]
     end
 
+    -- 构建真实的key.  routelimit-count-route:2671412137:123
     key = gen_limit_key(conf, ctx, key)
     if not key then
         return 500

@@ -1005,6 +1005,7 @@ function _M.init_worker()
 end
 
 
+-- apisix.http_exit_worker() -> .
 function _M.exit_worker()
     if process.type() == "privileged agent" and runner then
         -- We need to send SIGTERM in the exit_worker phase, as:

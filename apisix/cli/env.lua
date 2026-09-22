@@ -27,6 +27,17 @@ local arg = arg
 local package = package
 local tonumber = tonumber
 
+--    return {
+--        apisix_home = apisix_home,
+--        is_root_path = is_root_path,
+--        openresty_args = openresty_args,
+--        openresty_info = or_info,
+--        use_apisix_base = use_apisix_base,
+--        pkg_cpath_org = pkg_cpath_org,
+--        pkg_path_org = pkg_path_org,
+--        min_etcd_version = min_etcd_version,
+--        ulimit = ulimit,
+--    }
 return function (apisix_home, pkg_cpath_org, pkg_path_org)
     -- ulimit setting should be checked when APISIX starts
     local res, err = util.execute_cmd("ulimit -n")

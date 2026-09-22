@@ -34,13 +34,18 @@ local only_uri_router
 local _M = {version = 0.1}
 
 
+-- 根据route的属性，构建router参数添加到host_routes或only_uri_routes中
+-- route 为要处理的一条路由
+-- host_routes 的格式为二级hash如 host_routes[host][uri]
 local function push_host_router(route, host_routes, only_uri_routes)
     if type(route) ~= "table" then
         return
     end
 
-    -- route.script配置项目
+    -- route.filter_fun 配置项
     local filter_fun, err
+    --User defined filter function to match the route. Can be used for custom matching scenarios.
+    --  vars and opts will be passed to the function when matching a route
     if route.value.filter_func then
         filter_fun, err = loadstring(
                                 "return " .. route.value.filter_func,
@@ -71,7 +76,8 @@ local function push_host_router(route, host_routes, only_uri_routes)
         end
     end
 
-    -- 没有传hosts, 因为host已经在外层匹配过了。
+    -- 构建参数： https://github.com/api7/lua-resty-radixtree#attributes
+    -- 一条路由的构建参数。 没有传hosts, 因为host已经在外层匹配过了。
     local radixtree_route = {
         paths = route.value.uris or route.value.uri,
         methods = route.value.methods,
@@ -88,14 +94,16 @@ local function push_host_router(route, host_routes, only_uri_routes)
         end
     }
 
-    -- 如果没配置hosts, 插入only_uri_routes
+    -- 如果hosts为nil, 则将构建出来的参数加入only_uri_routes
     if hosts == nil then
         core.table.insert(only_uri_routes, radixtree_route)
         return
     end
 
-    -- 对每个host主机名，插入对应的路由配置
+-- hosts不为nil, 则将构建出来的参数按host加入 每个host_routes[host_rev] 中
+    -- 一条路由上可以同时配置多个host. 此处对route上每个host主机名，插入对应的路由配置
     for i, host in ipairs(hosts) do
+        -- 倒置,除了类似如 *.test.com 的形式
         local host_rev = host:reverse()
         if not host_routes[host_rev] then
             host_routes[host_rev] = {radixtree_route}
@@ -106,6 +114,7 @@ local function push_host_router(route, host_routes, only_uri_routes)
 end
 
 
+-- host_uri为两级，先根据host倒置匹配到sub_router, 再执行sub_router根据uri进行匹配
 local function create_radixtree_router(routes)
     -- key为虚拟主机的reverse。 value为 https://github.com/api7/lua-resty-radixtree#new routes参数
     local host_routes = {} -- group by vhost
@@ -116,24 +125,27 @@ local function create_radixtree_router(routes)
     -- 遍历所有的routes配置，group by host 到host_routes 中
     for _, route in ipairs(routes) do
         local status = core.table.try_read_attr(route, "value", "status")
-        -- check the status
+        -- check the status， 如果未禁用
         if not status or status == 1 then
+            -- 根据route的属性，构建router参数添加到host_routes或only_uri_routes中
             push_host_router(route, host_routes, only_uri_routes)
         end
     end
 
-    --针对每个host, 创建router
     -- create router: host_router
     local host_router_routes = {}
+    --针对每个host, 创建sub_router
     for host_rev, routes in pairs(host_routes) do
+        -- 创建子路由器
         local sub_router = router.new(routes)       -- sub_router
 
         core.table.insert(host_router_routes, {
             paths = host_rev,  -- 此处paths传入的是host_rev。 实际路由匹配时，也是先拿host进行匹配
-            -- 自定义场景匹配
+            -- filter_fun: 自定义过滤器
             filter_fun = function(vars, opts, ...) -- 匹配到后，再由sub_router根据uri进行匹配
                 return sub_router:dispatch(vars.uri, opts, ...)
             end,
+            -- will be called when a route matches while using rx:dispatch
             handler = function (api_ctx, match_opts)
                 api_ctx.real_curr_req_matched_host = match_opts.matched._path
             end

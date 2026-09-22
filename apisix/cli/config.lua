@@ -17,6 +17,7 @@
 
 local table_conact = table.concat
 
+-- 默认配置
 local _M = {
   apisix = {
     node_listen = { 9080 },

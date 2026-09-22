@@ -57,6 +57,7 @@ local function tab_is_array(t)
 end
 
 
+-- 解析环境变量
 local function var_sub(val)
     local err
     local var_used = false
@@ -71,6 +72,7 @@ local function var_sub(val)
             var = var:sub(1, i - 1)
         end
 
+        -- 解析环境变量
         local v = getenv(var) or default
         if v then
             if not exported_vars then
@@ -102,8 +104,29 @@ end
 
 
 local function resolve_conf_var(conf)
-    local renamed_keys
+    local new_keys = {}
     for key, val in pairs(conf) do
+        -- avoid re-iterating the table for already iterated key
+        if new_keys[key] then
+            goto continue
+        end
+        -- 1. 处理key
+        -- substitute environment variables from conf keys
+        if type(key) == "string" then
+            local new_key, _, err = var_sub(key)
+            if err then
+                return nil, err
+            end
+            -- key包含变量
+            if new_key ~= key then
+                new_keys[new_key] = "dummy" -- we only care about checking the key
+                conf.key = nil
+                -- new_key = val
+                conf[new_key] = val
+                key = new_key
+            end
+        end
+        -- 2. 处理 value
         if type(val) == "table" then
             local ok, err = resolve_conf_var(val)
             if not ok then
@@ -127,29 +150,10 @@ local function resolve_conf_var(conf)
                 end
             end
 
+            -- 设置新的val
             conf[key] = new_val
         end
-
-        -- substitute environment variables from conf keys. The rename is
-        -- deferred because inserting a new key while iterating with pairs()
-        -- is undefined behavior.
-        if type(key) == "string" then
-            local new_key, _, err = var_sub(key)
-            if err then
-                return nil, err
-            end
-            if new_key ~= key then
-                renamed_keys = renamed_keys or {}
-                renamed_keys[key] = new_key
-            end
-        end
-    end
-
-    if renamed_keys then
-        for key, new_key in pairs(renamed_keys) do
-            conf[new_key] = conf[key]
-            conf[key] = nil
-        end
+        ::continue::
     end
 
     return true
@@ -193,6 +197,7 @@ local function path_is_multi_type(path, type_val)
 end
 
 
+-- 合并配置
 local function merge_conf(base, new_tab, ppath)
     ppath = ppath or ""
 
@@ -241,16 +246,19 @@ local function merge_conf(base, new_tab, ppath)
     return base
 end
 
--- 读取conf/conf.yaml 并于默认配置apisix.cli.config合并
+-- 读取conf/conf.yaml 并与默认配置 apisix.cli.config.lua 合并
 function _M.read_yaml_conf(apisix_home)
     if apisix_home then
         profile.apisix_home = apisix_home .. "/"
     end
 
+    -- 如果存在 conf/.customized_config_path， 则读取并返回其内容
     local local_conf_path = profile:customized_yaml_path()
+    -- 否则使用默认的配置 conf/config.yaml
     if not local_conf_path then
         local_conf_path = profile:yaml_path("config")
     end
+    -- 读取文件内容
     local user_conf_yaml, err = util.read_file(local_conf_path)
     if not user_conf_yaml then
         return nil, err
@@ -265,24 +273,26 @@ function _M.read_yaml_conf(apisix_home)
     end
 
     if not is_empty_file then
+        -- lyaml https://github.com/gvvaughan/lyaml
         local user_conf = yaml.load(user_conf_yaml)
-        -- lyaml returns a scalar for a document such as `foo`, which would blow
-        -- up in resolve_conf_var's pairs() below
-        if type(user_conf) ~= "table" then
+        if not user_conf then
             return nil, "invalid config.yaml file"
         end
 
+        -- 解析配置文件中的环境变量
         local ok, err = resolve_conf_var(user_conf)
         if not ok then
             return nil, err
         end
 
+        -- 将默认配置与config.yaml配置合并
         ok, err = merge_conf(default_conf, user_conf)
         if not ok then
             return nil, err
         end
     end
 
+    -- config.yaml schema 校验
     -- fill the default value by the schema
     local ok, err = schema.validate(default_conf)
     if not ok then
@@ -292,10 +302,7 @@ function _M.read_yaml_conf(apisix_home)
         default_conf.deployment.config_provider = "etcd"
         if default_conf.deployment.role == "traditional" then
             default_conf.etcd = default_conf.deployment.etcd
-            -- `role_traditional:` written as YAML null makes merge_conf drop the
-            -- default table, so it cannot be indexed blindly
-            local role_traditional = default_conf.deployment.role_traditional
-            if role_traditional and role_traditional.config_provider == "yaml" then
+            if default_conf.deployment.role_traditional.config_provider == "yaml" then
                 default_conf.deployment.config_provider = "yaml"
             end
 
@@ -350,7 +357,7 @@ function _M.read_yaml_conf(apisix_home)
             -- Therefore we need to check the absolute version instead
             local cert_path = pl_path.abspath(apisix_ssl.ssl_trusted_certificate)
             if not pl_path.exists(cert_path) then
-                util.die("certificate path ", cert_path, " doesn't exist\n")
+                util.die("certificate path", cert_path, "doesn't exist\n")
             end
             apisix_ssl.ssl_trusted_certificate = cert_path
         end

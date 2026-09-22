@@ -120,10 +120,14 @@ local function autogenerate_admin_key(default_conf)
 end
 
 
+
+-- init_by_lua_block -->apisix.http_init --> .
+-- 1. 自动生成了admin_key; 2.生成 conf/apisix.uid
 function _M.init()
+    -- 读取 config.yaml
     local local_conf = fetch_local_conf()
 
-    -- 如果未设置admin_key， 会自动生成一个
+    -- 如果未设置 admin_key， 会自动生成一个
     local local_conf, changed = autogenerate_admin_key(local_conf)
     if changed then --自动生成了admin_key
         local yaml_conf = generate_yaml(local_conf)
@@ -152,6 +156,7 @@ function _M.init()
         log.notice("not found apisix uid, generate a new one: ", apisix_uid)
     end
 
+    -- 写入到conf/apisix.uid
     local ok, err = write_file(uid_file_path, apisix_uid)
     if not ok then
         log.error(err)

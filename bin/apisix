@@ -17,6 +17,9 @@
 # limitations under the License.
 #
 
+# 脚本的作用
+##  1.找到luajit的位置; 2.找到apisix.lua的位置; 3 执行 luajit apisix.lua $*
+
 if [ -s './apisix/cli/apisix.lua' ]; then
     # install via source
     APISIX_LUA=./apisix/cli/apisix.lua
@@ -42,6 +45,7 @@ if [[ -e $OR_EXEC && "$OR_VER" -ge 119 ]]; then
 
     # use the luajit of openresty
     echo "$LUAJIT_BIN $APISIX_LUA $*"
+    # /usr/local/openresty/luajit/bin/luajit ./apisix/cli/apisix.lua test
     exec $LUAJIT_BIN $APISIX_LUA $*
 else
     echo "ERROR: Please check the version of OpenResty and Lua, OpenResty 1.19+ + LuaJIT is required for Apache APISIX."

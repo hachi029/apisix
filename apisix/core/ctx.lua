@@ -27,6 +27,9 @@ local json         = require("apisix.core.json")
 local config_local = require("apisix.core.config_local")
 local tablepool    = require("tablepool")
 -- https://github.com/api7/lua-var-nginx-module 性能更高
+-- 对于常用的var, 通过ffi直接调用Nignx接口获取变量值.而ngx.var.xxx则使用的元表
+-- 使用 FFI 的方式来直接获取变量，绕过了 ngx.var 原有的查找逻辑；
+-- 同时，缺点也很明显，那就是要为每一个希望获取的变量，都增加对应的 C 函数和 FFI 调用，这其实是一个体力活
 local get_var      = require("resty.ngxvar").fetch
 local get_request  = require("resty.ngxvar").request
 local ck           = require "resty.cookie"
@@ -273,7 +276,7 @@ do
     }
 
     local mt = {
-        -- 高性能原因：resty.ngxvar库和cached
+        -- 高性能原因：resty.ngxvar库和cache
         -- cookie_:  resty.cookie 库来读取
         -- arg_: request.get_uri_args()[arg_key]
         -- post_arg_: request.get_post_args()[arg_key]
@@ -405,6 +408,7 @@ do
             return val
         end,
 
+        -- get
         __newindex = function(t, key, val)
             if ngx_var_names[key] then
                 ngx_var[key] = val
@@ -452,6 +456,7 @@ function _M.register_var(name, getter, opts)
     end
 end
 
+-- 为ctx设置元表，当读取ctx变量时，调用元表中的方法
 function _M.set_vars_meta(ctx)
     local var = tablepool.fetch("ctx_var", 0, 32)
     if not var._cache then
@@ -464,6 +469,7 @@ function _M.set_vars_meta(ctx)
     ctx.var = var
 end
 
+-- 释放ctx.var表
 function _M.release_vars(ctx)
     if ctx.var == nil then
         return

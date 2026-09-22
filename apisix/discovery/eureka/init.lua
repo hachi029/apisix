@@ -31,6 +31,8 @@ local str_find           = core.string.find
 local log                = core.log
 
 local default_weight
+-- 保存从eureka接口/apps中获取到的应用及实例信息
+-- key: app.name, value: [{host,port,weight,metadata}, {host,port,weight,metadata},...]
 local applications
 
 
@@ -73,6 +75,7 @@ local function build_endpoints()
 end
 
 
+-- 向eureka server 发起请求
 local function request(request_uri, basic_auth, method, path, query, body)
     log.info("eureka uri:", request_uri, ".")
     local url = request_uri .. path
@@ -113,6 +116,7 @@ local function request(request_uri, basic_auth, method, path, query, body)
 end
 
 
+-- 解析eureka /apps接口返回的数据， 返回 {ip, port, instance.metadata}
 local function parse_instance(instance)
     local status = instance.status
     local overridden_status = instance.overriddenstatus or instance.overriddenStatus
@@ -149,6 +153,7 @@ local function parse_instance(instance)
 end
 
 
+--  定时任务，每30秒执行一次。请求eureka的/apps接口，解析接口响应，结果保存在全局变量 applications 中
 local function fetch_full_registry(premature)
     if premature then
         return
@@ -187,6 +192,7 @@ local function fetch_full_registry(premature)
         log.error("invalid response body: ", selected_body, " err: ", err)
         return
     end
+    -- 解析/apps接口返回数据
     local apps = data.applications.application
     local up_apps = core.table.new(0, #apps)
     for _, app in ipairs(apps) do
@@ -198,6 +204,7 @@ local function fetch_full_registry(premature)
                     nodes = core.table.new(#app.instance, 0)
                     up_apps[app.name] = nodes
                 end
+                -- 服务信息
                 core.table.insert(nodes, {
                     host = ip,
                     port = port,
@@ -212,12 +219,14 @@ local function fetch_full_registry(premature)
             end
         end
     end
+    -- key: app.name, value: [{host,port,weight,metadata}, {host,port,weight,metadata},...]
     applications = up_apps
     log.info("successfully updated service registry, services count=",
              core.table.nkeys(up_apps), "; source=", selected_endpoint.url)
 end
 
 
+-- 根据服务名称读取节点地址列表
 function _M.nodes(service_name)
     if not applications then
         log.error("failed to fetch nodes for : ", service_name)
@@ -228,12 +237,14 @@ function _M.nodes(service_name)
 end
 
 
+-- apisix.http_init_worker() -> discovery.init_worker() -> .
 function _M.init_worker()
     default_weight = local_conf.discovery.eureka.weight or 100
     log.info("default_weight:", default_weight, ".")
     local fetch_interval = local_conf.discovery.eureka.fetch_interval or 30
     log.info("fetch_interval:", fetch_interval, ".")
     ngx_timer_at(0, fetch_full_registry)
+    -- 启动定时任务，每30秒执行一次
     ngx_timer_every(fetch_interval, fetch_full_registry)
 end
 

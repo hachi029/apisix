@@ -71,6 +71,7 @@ function _M.new(prefix)
         local method
         update_log_level()
 
+        -- 支持动态修改日志级别
         if cur_level and (log_level > cur_level)
         then
             method = do_nothing

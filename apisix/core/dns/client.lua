@@ -106,6 +106,7 @@ function _M.resolve(self, domain, selector)
                     .. ": " .. answers.errstr
     end
 
+    -- 如果是返回所有
     if selector == _M.RETURN_ALL then
         log.info("dns resolve ", domain, ", result: ", json.delay_encode(answers))
         for _, answer in ipairs(answers) do
@@ -116,6 +117,7 @@ function _M.resolve(self, domain, selector)
         return table.deepcopy(answers)
     end
 
+    -- 否则，随机返回一个
     local idx = math_random(1, #answers)
     local answer = answers[idx]
     local dns_type = answer.type
@@ -149,6 +151,7 @@ function _M.new(opts)
     opts.retrans = 5 -- 5 retransmissions on receive timeout
     opts.finalCacheOnly = true -- only cache final records
 
+    -- https://github.com/openresty/lua-resty-dns
     -- make sure each client has its separate room
     package_loaded["resty.dns.client"] = nil
     local dns_client_mod = require("resty.dns.client")

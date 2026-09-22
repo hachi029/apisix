@@ -24,6 +24,7 @@ local error = error
 
 local _M = {}
 
+-- 为 core.config.new("/global_rules",opts)
 local global_rules
 
 
@@ -40,6 +41,7 @@ function _M.init_worker()
     global_rules, err = core.config.new("/global_rules", {
         automatic = true,
         item_schema = core.schema.global_rule,
+        -- checker, global_rules本质就是plugin
         checker = plugin_checker,
         filter = filter
     })
@@ -50,10 +52,12 @@ function _M.init_worker()
 end
 
 
+-- 获取当前配置的全局策略, 返回值为 "/global_rules"配置目录下的 配置值 和 配置版本
 function _M.global_rules()
     if not global_rules then
         return nil, nil
     end
+    -- conf_version 初始为0， 配置每变化一次，conf_version+1
     return global_rules.values, global_rules.conf_version
 end
 

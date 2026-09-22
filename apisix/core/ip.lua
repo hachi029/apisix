@@ -21,6 +21,7 @@
 
 local json = require("apisix.core.json")
 local log = require("apisix.core.log")
+-- https://github.com/api7/lua-resty-ipmatcher/
 local ipmatcher = require("resty.ipmatcher")
 local str_sub   = string.sub
 local str_find  = require("apisix.core.string").find

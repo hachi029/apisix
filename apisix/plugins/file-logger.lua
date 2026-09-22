@@ -34,7 +34,6 @@ local schema = {
             type = "string"
         },
         log_format = {type = "object"},
-        log_format_extra = {type = "object"},
         include_req_body = {type = "boolean", default = false},
         include_req_body_expr = {
             type = "array",
@@ -71,9 +70,6 @@ local metadata_schema = {
             type = "string"
         },
         log_format = {
-            type = "object"
-        },
-        log_format_extra = {
             type = "object"
         }
     }
@@ -159,6 +155,7 @@ if is_apisix_or then
         local last_reopen_time = process.get_last_reopen_ms()
 
         -- lru_cache
+        --  key: 缓存key; version: 缓存版本; create_obj_fun: 如果缓存不存在，创建方法; ... create_obj_fun参数
         local handler, err = path_to_file(conf.path, 0, open_file_handler, conf, {})
         if not handler then
             return nil, err
@@ -191,7 +188,7 @@ local function write_file_data(conf, log_message)
     local file, err
     local file_conf = conf.path and conf or {path = path}
     if open_file_cache then
-        file, err = open_file_cache(file_conf)   --handler缓存
+        file, err = open_file_cache(file_conf)
     else
         file, err = io_open(path, 'a+')
     end

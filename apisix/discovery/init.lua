@@ -29,9 +29,12 @@ if discovery_type then
     end
 end
 
+-- apisix.http_init_worker() -> .
 function discovery.init_worker()
+    -- 可以配置多种discover center
     if discovery_type then
         for discovery_name, _ in pairs(discovery_type) do
+            -- 调用每种服务发现的init_worker方法
             discovery[discovery_name].init_worker()
         end
     end

@@ -80,6 +80,7 @@ local function leaving_thread(premature, self, key, req_latency, req_id)
 end
 
 
+-- 在log_by_lua阶段执行
 function _M.leaving(self, key, req_latency)
     local req_id
     if ngx.ctx.limit_conn_req_ids then

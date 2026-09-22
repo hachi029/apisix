@@ -138,6 +138,7 @@ end
 
 
 function _M.access(conf, ctx)
+    -- 获取limiter对象
     local lim, err = core.lrucache.plugin_ctx(lrucache, ctx, nil,
                                               create_limit_obj, conf)
     if not lim then
@@ -150,6 +151,7 @@ function _M.access(conf, ctx)
 
     -- key ["remote_addr", "server_addr", "http_x_real_ip", "http_x_forwarded_for", "consumer_name"]
     local conf_key = conf.key
+    -- 构建key
     local key
     -- key_type ["var", "var_combination"]
     if conf.key_type == "var_combination" then  --包含nginx多个变量
@@ -176,6 +178,7 @@ function _M.access(conf, ctx)
     key = gen_limit_key(conf, ctx, key)
     core.log.info("limit key: ", key)
 
+    -- 如果基于redis, 需要4次redis get/set操作
     local delay, err = lim:incoming(key, true)
     if not delay then
         if err == "rejected" then

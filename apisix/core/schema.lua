@@ -35,6 +35,7 @@ local _M = {
 }
 
 
+-- 创建一个新的validator
 local function create_validator(schema)
     -- local code = jsonschema.generate_validator_code(schema, opts)
     -- local file2=io.output("/tmp/2.txt")
@@ -51,6 +52,7 @@ local function create_validator(schema)
     return nil, res -- error message
 end
 
+-- 从缓存中取出一个validator, 如果不存在，则创建一个
 local function get_validator(schema)
     local validator, err = cached_validator(schema, nil,
                                 create_validator, schema)
@@ -76,6 +78,7 @@ end
 _M.valid = get_validator
 
 setmetatable(_M, {
+    -- schema_def 里定义了每种资源的schema
     __index = schema_def,
     __newindex = function() error("no modification allowed") end,
 })

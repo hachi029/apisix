@@ -32,10 +32,13 @@ function _M.generate_complex_value(data, ctx)
     local tmp = core.tablepool.fetch("proxy_cache_complex_value", #data, 0)
 
     core.log.info("proxy-cache complex value: ", core.json.delay_encode(data))
+    -- 遍历每个变量
     for i, value in ipairs(data) do
         core.log.info("proxy-cache complex value index-", i, ": ", value)
 
+        -- 如果以$开头
         if string.byte(value, 1, 1) == string.byte('$') then
+            -- 读取变量值
             tmp[i] = ctx.var[string.sub(value, 2)] or ""
         else
             tmp[i] = value
@@ -48,6 +51,7 @@ function _M.generate_complex_value(data, ctx)
 end
 
 
+-- 检查当前请求方法是否匹配 conf.cache_method
 -- check whether the request method match the user defined.
 function _M.match_method(conf, ctx)
     for _, method in ipairs(conf.cache_method) do
@@ -60,6 +64,7 @@ function _M.match_method(conf, ctx)
 end
 
 
+-- 检查当前请求响应码是否匹配 cache_http_status
 -- check whether the response status match the user defined.
 function _M.match_status(conf, ctx)
     for _, status in ipairs(conf.cache_http_status) do
@@ -82,6 +87,8 @@ function _M.file_exists(name)
 end
 
 
+-- cache_path: /tmp/disk_cache_one; cache_levels: 1:2:3, cache_key=xxx
+-- /tmp/disk_cache_one/d/3a/ccb/f561aaf6ef0bf14d4208bb46a4ccb3ad
 function _M.generate_cache_filename(cache_path, cache_levels, cache_key)
     local md5sum = ngx.md5(cache_key)
     local levels = ngx_re.split(cache_levels, ":")

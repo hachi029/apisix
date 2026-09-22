@@ -51,6 +51,8 @@ local function init_resty_events()
 end
 
 
+-- apisix.http_init_worker() --> .
+-- 主要根据配置使用的event_module是lua-resty-events 还是 lua-resty-worker-events，进行不同的初始化
 function _M.init_worker()
     if _M.inited then
         -- prevent duplicate initializations in the same worker to

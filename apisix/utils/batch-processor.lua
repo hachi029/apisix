@@ -123,7 +123,6 @@ end
 
 --每inactive_timeout秒执行一次
 local function flush_buffer(premature, self)
-    -- inactive_timeout不活跃或超过buffer_duration批次还没满
     if premature or exiting() or
        now() - self.last_entry_t >= self.inactive_timeout or
        now() - self.first_entry_t >= self.buffer_duration

@@ -18,14 +18,10 @@
 local ngx = ngx
 local core = require("apisix.core")
 local uuid = require("resty.jit-uuid")
-local resty_random = require("resty.random")
+local nanoid = require("nanoid")
 local ksuid = require("resty.ksuid")
 local math_random = math.random
 local str_byte = string.byte
-local str_sub = string.sub
-local table_concat = table.concat
-local bit = require("bit")
-local band = bit.band
 local ffi = require "ffi"
 
 local plugin_name = "request-id"
@@ -75,22 +71,6 @@ function _M.check_schema(conf)
     return core.schema.check(schema, conf)
 end
 
--- standard nanoid alphabet: 64 characters, so 6 bits of CSPRNG output map
--- to one character without modulo bias
-local NANOID_ALPHABET = "-_0123456789abcdefghijklmnopqrstuvwxyz"
-                        .. "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-local NANOID_SIZE = 21
-
-local function get_nanoid()
-    local bytes = resty_random.bytes(NANOID_SIZE)
-    local id = core.table.new(NANOID_SIZE, 0)
-    for i = 1, NANOID_SIZE do
-        local idx = band(str_byte(bytes, i), 63) + 1
-        id[i] = str_sub(NANOID_ALPHABET, idx, idx)
-    end
-    return table_concat(id)
-end
-
 -- generate range_id
 local function get_range_id(range_id)
     local res = ffi.new("unsigned char[?]", range_id.length)
@@ -108,7 +88,7 @@ local function get_request_id(conf)
         return core.utils.generate_uuid_v7()
     end
     if conf.algorithm == "nanoid" then
-        return get_nanoid()
+        return nanoid.safe_simple()
     end
 
     if conf.algorithm == "range_id" then
@@ -127,7 +107,7 @@ function _M.rewrite(conf, ctx)
     local headers = ngx.req.get_headers()
     local uuid_val
     local header_req_id = headers[conf.header_name]
-    if not header_req_id or header_req_id == "" then   --如果请求头里没有request_id，则设置一个
+    if not header_req_id or header_req_id == "" then
         uuid_val = get_request_id(conf)
         core.request.set_header(ctx, conf.header_name, uuid_val)
     else

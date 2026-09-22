@@ -31,9 +31,11 @@ local assert = assert
 local _M = {}
 
 
+-- 执行shell 命令如：util.execute_cmd("ulimit -n")
 -- Note: The `execute_cmd` return value will have a line break at the end,
 -- it is recommended to use the `trim` function to handle the return value.
 local function execute_cmd(cmd)
+    -- lua api
     local t, err = popen(cmd)
     if not t then
         return nil, "failed to execute command: "
@@ -75,7 +77,9 @@ function _M.split(self, sep)
 end
 
 
+-- 读取并返回文件内容
 function _M.read_file(file_path)
+    -- io.open
     local file, err = open(file_path, "rb")
     if not file then
         return false, "failed to open file: " .. file_path .. ", error info:" .. err
@@ -91,6 +95,8 @@ function _M.read_file(file_path)
 end
 
 
+-- util.die("failed to backup nginx.conf, error: ", err)
+-- 1.输出错误消息; 2. 退出 os.exit(1)
 function _M.die(...)
     stderr:write(...)
     exit(1)

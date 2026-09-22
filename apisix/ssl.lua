@@ -16,19 +16,32 @@
 --
 local core           = require("apisix.core")
 local secret         = require("apisix.secret")
-local data_encryption = core.data_encryption
 local ngx_ssl        = require("ngx.ssl")
 local ngx_ssl_client = require("ngx.ssl.clienthello")
+local ffi            = require("ffi")
 
+local C = ffi.C
+local ngx_encode_base64 = ngx.encode_base64
+local ngx_decode_base64 = ngx.decode_base64
+local aes = require("resty.aes")
 local str_lower = string.lower
 local str_byte = string.byte
+local assert = assert
+local type = type
+local ipairs = ipairs
 local ngx_sub = ngx.re.sub
-local ngx_var = ngx.var
 
+ffi.cdef[[
+unsigned long ERR_peek_error(void);
+void ERR_clear_error(void);
+]]
+
+-- PEM格式到opaque cdata pointer格式的证书缓存
 local cert_cache = core.lrucache.new {
     ttl = 3600, count = 1024,
 }
 
+-- PEM格式到opaque cdata pointer格式的证书私钥缓存
 local pkey_cache = core.lrucache.new {
     ttl = 3600, count = 1024,
 }
@@ -37,34 +50,32 @@ local pkey_cache = core.lrucache.new {
 local _M = {}
 
 
--- `preread` takes the SNI from ngx_stream_ssl_preread_module: under TLS passthrough
--- this worker never performs the handshake, so ngx_ssl.server_name() has nothing.
-function _M.server_name(clienthello, preread)
+-- clienthello: true or false
+-- 返回SNI
+function _M.server_name(clienthello)
     local sni, err
     if clienthello then
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl/clienthello.md#get_client_hello_server_name
         sni, err = ngx_ssl_client.get_client_hello_server_name()
-    elseif preread then
-        sni = ngx_var.ssl_preread_server_name
-        if sni == "" then
-            -- defined but empty when the ClientHello carried no SNI; "" is truthy
-            -- and would skip the fallback below
-            sni = nil
-        end
     else
+        -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#server_name
         sni, err = ngx_ssl.server_name()
     end
     if err then
         return nil, err
     end
 
+    -- 请求中不存在sni, 使用fallback_sni
     if not sni then
         local local_conf = core.config.local_conf()
         sni = core.table.try_read_attr(local_conf, "apisix", "ssl", "fallback_sni")
         if not sni then
+            -- 如果未配置fallback_sni, 则返回nil
             return nil
         end
     end
 
+    -- 转小写
     sni = ngx_sub(sni, "\\.$", "", "jo")
     sni = str_lower(sni)
     return sni
@@ -76,31 +87,110 @@ function _M.session_hostname()
 end
 
 
+-- 设置客户端支持的协议
 function _M.set_protocols_by_clienthello(ssl_protocols)
     if ssl_protocols then
+        --https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl/clienthello.md#set_protocols
+        -- Example: ssl_clt.set_protocols({"TLSv1.1", "TLSv1.2", "TLSv1.3"})
        return ngx_ssl_client.set_protocols(ssl_protocols)
     end
     return true
 end
 
 
--- Encrypt an SSL private key with the data_encryption keyring. Only PEM-form
--- keys are encrypted, so already-encrypted or non-PEM values pass through.
-function _M.aes_encrypt_pkey(origin)
-    if not core.string.has_prefix(origin, "---") then
-        return origin
+local function init_iv_tbl(ivs)
+    local _aes_128_cbc_with_iv_tbl = core.table.new(2, 0)
+    local type_ivs = type(ivs)
+
+    if type_ivs == "table" then
+        for _, iv in ipairs(ivs) do
+            local aes_with_iv = assert(aes:new(iv, nil, aes.cipher(128, "cbc"), {iv = iv}))
+            core.table.insert(_aes_128_cbc_with_iv_tbl, aes_with_iv)
+        end
+    elseif type_ivs == "string" then
+        local aes_with_iv = assert(aes:new(ivs, nil, aes.cipher(128, "cbc"), {iv = ivs}))
+        core.table.insert(_aes_128_cbc_with_iv_tbl, aes_with_iv)
     end
 
-    return data_encryption.encrypt(origin)
+    return _aes_128_cbc_with_iv_tbl
 end
 
 
-local function aes_decrypt_pkey(origin)
-    if core.string.has_prefix(origin, "---") then
+local _aes_128_cbc_with_iv_tbl_gde
+local function get_aes_128_cbc_with_iv_gde(local_conf)
+    if _aes_128_cbc_with_iv_tbl_gde == nil then
+        local ivs = core.table.try_read_attr(local_conf, "apisix", "data_encryption", "keyring")
+        _aes_128_cbc_with_iv_tbl_gde = init_iv_tbl(ivs)
+    end
+
+    return _aes_128_cbc_with_iv_tbl_gde
+end
+
+
+
+local function encrypt(aes_128_cbc_with_iv, origin)
+    local encrypted = aes_128_cbc_with_iv:encrypt(origin)
+    if encrypted == nil then
+        core.log.error("failed to encrypt key")
         return origin
     end
 
-    return data_encryption.decrypt(origin, "ssl key")
+    return ngx_encode_base64(encrypted)
+end
+
+-- 对私钥进行ase decrypt
+function _M.aes_encrypt_pkey(origin, field)
+    local local_conf = core.config.local_conf()
+    local aes_128_cbc_with_iv_tbl_gde = get_aes_128_cbc_with_iv_gde(local_conf)
+    local aes_128_cbc_with_iv_gde = aes_128_cbc_with_iv_tbl_gde[1]
+
+    if not field then
+        if aes_128_cbc_with_iv_gde ~= nil and core.string.has_prefix(origin, "---") then
+            return encrypt(aes_128_cbc_with_iv_gde, origin)
+        end
+    else
+        if field == "data_encrypt" then
+            if aes_128_cbc_with_iv_gde ~= nil then
+                return encrypt(aes_128_cbc_with_iv_gde, origin)
+            end
+        end
+    end
+    return origin
+end
+
+
+-- 对私钥进行ase decrypt
+local function aes_decrypt_pkey(origin, field)
+    if not field and core.string.has_prefix(origin, "---") then
+        return origin
+    end
+
+    local local_conf = core.config.local_conf()
+    local aes_128_cbc_with_iv_tbl = get_aes_128_cbc_with_iv_gde(local_conf)
+    if #aes_128_cbc_with_iv_tbl == 0 then
+        return origin
+    end
+
+    local decoded_key = ngx_decode_base64(origin)
+    if not decoded_key then
+        core.log.error("base64 decode ssl key failed")
+        return nil, "base64 decode ssl key failed"
+    end
+
+    for _, aes_128_cbc_with_iv in ipairs(aes_128_cbc_with_iv_tbl) do
+        local decrypted = aes_128_cbc_with_iv:decrypt(decoded_key)
+        if decrypted then
+            return decrypted
+        end
+
+        if C.ERR_peek_error() then
+            -- clean up the error queue of OpenSSL to prevent
+            -- normal requests from being interfered with.
+            C.ERR_clear_error()
+        end
+    end
+
+    return nil, "decrypt ssl key failed"
 end
 _M.aes_decrypt_pkey = aes_decrypt_pkey
 
@@ -134,6 +224,8 @@ end
 _M.validate = validate
 
 
+-- Converts the PEM-formated SSL certificate chain data into an opaque cdata pointer
+-- (for later uses in the set_cert function, for example).
 local function parse_pem_cert(sni, cert)
     core.log.debug("parsing cert for sni: ", sni)
 
@@ -142,7 +234,9 @@ local function parse_pem_cert(sni, cert)
 end
 
 
+-- 将PEM格式的证书转换为an opaque cdata pointer (for later uses in the set_cert function）
 function _M.fetch_cert(sni, cert)
+    -- 先从缓存中取，否则调用parse_pem_cert构建缓存
     local parsed_cert, err = cert_cache(cert, nil, parse_pem_cert, sni, cert)
     if not parsed_cert then
         return false, err
@@ -152,19 +246,24 @@ function _M.fetch_cert(sni, cert)
 end
 
 
+-- Converts the PEM-formatted SSL private key data into an opaque cdata pointer
+-- (for later uses in the set_priv_key function, for example).
 local function parse_pem_priv_key(sni, pkey)
     core.log.debug("parsing priv key for sni: ", sni)
 
+    -- 先aes decrypt
     local key, err = aes_decrypt_pkey(pkey)
     if not key then
         core.log.error(err)
         return nil, err
     end
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#parse_pem_priv_key
     local parsed, err = ngx_ssl.parse_pem_priv_key(key)
     return parsed, err
 end
 
 
+--将PEM格式的私钥证书转换为an opaque cdata pointer (for later uses in the set_priv_key function）
 function _M.fetch_pkey(sni, pkey)
     local parsed_pkey, err = pkey_cache(pkey, nil, parse_pem_priv_key, sni, pkey)
     if not parsed_pkey then
@@ -176,6 +275,7 @@ end
 
 
 local function support_client_verification()
+    -- https://github.com/openresty/lua-resty-core/blob/master/lib/ngx/ssl.md#verify_client
     return ngx_ssl.verify_client ~= nil
 end
 _M.support_client_verification = support_client_verification
@@ -224,11 +324,9 @@ function _M.check_ssl_conf(in_dp, conf)
             return nil, "client tls verify unsupported"
         end
 
-        if not secret.check_secret_uri(conf.client.ca) then
-            local ok, err = validate(conf.client.ca, nil)
-            if not ok then
-                return nil, "failed to validate client_cert: " .. err
-            end
+        local ok, err = validate(conf.client.ca, nil)
+        if not ok then
+            return nil, "failed to validate client_cert: " .. err
         end
     end
 
@@ -236,6 +334,12 @@ function _M.check_ssl_conf(in_dp, conf)
 end
 
 
+--- The Certificate Status Request extension, also known as OCSP Stapling,
+--- allows the client to request that the server provide a time-stamped OCSP response during the TLS handshake.
+--- This eliminates the need for the client to contact the OCSP responder directly, improving privacy and performance.
+--- The server "staples" the OCSP response to the certificate chain, reducing latency and preventing OCSP responder overload.
+--- OCSP Stapling is particularly important for mobile and high-traffic websites. Defined in RFC 6066.
+--- 返回是否需要 OCSP Stapling
 function _M.get_status_request_ext()
     core.log.debug("parsing status request extension ... ")
     local ext = ngx_ssl_client.get_client_hello_ext(5)

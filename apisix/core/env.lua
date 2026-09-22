@@ -40,28 +40,8 @@ ffi.cdef [[
   extern char **environ;
 ]]
 
+-- init_by_lua_block -->apisix.http_init-->.
 -- 解析环境变量为 apisix_env_vars
-
--- Build an exact-keyed table from the process environment (`environ`).
---
--- This is intentionally used instead of `os.getenv` to sidestep a bug in
--- lua-resty-core's `os.getenv` shim that is active before any request is
--- being served (init / init_worker phases). That shim relies on
--- `ngx_http_lua_ffi_get_conf_env`, which matches an `env NAME=VALUE;`
--- directive entry against the queried name with a prefix-only comparison
--- (`ngx_strncmp(name, var.data, var.len)`) and does not require the queried
--- name to end at `var.len`. As a result, when two `env` directives share a
--- common prefix (e.g. `KUBERNETES_CLIENT_TOKEN` and
--- `KUBERNETES_CLIENT_TOKEN_FILE`), the shorter declared name shadows the
--- longer one. Reading `environ` directly and keying by the substring before
--- the first `=` avoids the collision entirely. See apache/apisix#13055.
---
--- Note on phases: nginx applies `env NAME=VALUE;` directives to the real
--- `environ` in `ngx_set_environment`, which runs at worker process start
--- (before `init_worker_by_lua`). Therefore `init()` must be called again in
--- the worker init phase so that directive-assigned values are captured; at
--- the `init_by_lua` phase `environ` only contains variables inherited from
--- the OS, not the directive-assigned ones.
 function _M.init()
     local e = ffi.C.environ
     if not e then
@@ -82,23 +62,8 @@ function _M.init()
 end
 
 
--- 解析配置中的环境变量
-
--- Look up an environment variable by exact name.
---
--- Prefer the snapshot built by `init()` (immune to the prefix-collision bug
--- described above) and only fall back to `os.getenv` for variables that were
--- set dynamically after startup (e.g. via `core.os.setenv`).
-function _M.get(name)
-    local val = apisix_env_vars[name]
-    if val ~= nil then
-        return val
-    end
-
-    return os.getenv(name)
-end
-
-
+-- 解析配置中的环境变量 $ENV://$env_name/$sub_key
+-- env_name: 环境变量名称，sub_key: 当环境变量的值是 JSON 字符串时，获取某个属性的值
 local function parse_env_uri(env_uri)
     -- Avoid the error caused by has_prefix to cause a crash.
     if type(env_uri) ~= "string" then
@@ -133,8 +98,8 @@ function _M.fetch_by_uri(env_uri)
         return nil, err
     end
 
--- 读取环境变量
-    local main_value = _M.get(opts.key)
+    -- 读取环境变量
+    local main_value = apisix_env_vars[opts.key] or os.getenv(opts.key)
     if main_value and opts.sub_key ~= "" then
         local vt, err = json.decode(main_value)
         if not vt then

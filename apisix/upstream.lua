@@ -20,8 +20,6 @@ local discovery = require("apisix.discovery.init").discovery
 local upstream_util = require("apisix.utils.upstream")
 local apisix_ssl = require("apisix.ssl")
 local resource = require("apisix.resource")
-local openssl_x509 = require("resty.openssl.x509")
-local openssl_x509_store = require("resty.openssl.x509.store")
 local error = error
 local tostring = tostring
 local ipairs = ipairs
@@ -30,118 +28,28 @@ local pcall = pcall
 local str_byte = string.byte
 local ngx_var = ngx.var
 local is_http = ngx.config.subsystem == "http"
+-- core.config.new("/upstreams", opts)
 local upstreams
 local healthcheck_manager
 
 local set_upstream_tls_client_param
-local set_upstream_ssl_verify
-local set_upstream_ssl_trusted_store
 local ok, apisix_ngx_upstream = pcall(require, "resty.apisix.upstream")
 if ok then
     set_upstream_tls_client_param = apisix_ngx_upstream.set_cert_and_key
-    set_upstream_ssl_verify = apisix_ngx_upstream.set_ssl_verify
-    set_upstream_ssl_trusted_store = apisix_ngx_upstream.set_ssl_trusted_store
-end
--- guard each function independently: an older runtime may expose the module
--- (set_cert_and_key) without the newer upstream TLS C-APIs
-if not set_upstream_tls_client_param then
+else
     set_upstream_tls_client_param = function ()
         return nil, "need to build APISIX-Runtime to support upstream mTLS"
     end
 end
-if not set_upstream_ssl_verify then
-    set_upstream_ssl_verify = function ()
-        return nil, "need to build APISIX-Runtime to support upstream certificate verification"
-    end
-end
-if not set_upstream_ssl_trusted_store then
-    set_upstream_ssl_trusted_store = function ()
-        return nil, "need to build APISIX-Runtime to support upstream CA certificates"
-    end
-end
-
-
--- Keyed by the `ca_certs` array itself: a config update always rebuilds that
--- table, so a stale store can never outlive the certificates it was built from.
-local trusted_store_cache = core.lrucache.new({
-    ttl = 300, count = 256,
-})
-
-
-local function create_trusted_store(ca_certs)
-    local store, err = openssl_x509_store.new()
-    if not store then
-        return nil, err
-    end
-
-    for _, ca_cert in ipairs(ca_certs) do
-        local x509, err = openssl_x509.new(ca_cert, "PEM")
-        if not x509 then
-            return nil, err
-        end
-
-        local ok, err = store:add(x509)
-        if not ok then
-            return nil, err
-        end
-    end
-
-    return store
-end
-
-
--- Apply upstream.tls.verify / upstream.tls.ca_certs to the current request.
--- Both settings live in the apisix-nginx-module request context, which is wiped
--- by the internal redirect to @grpc_pass, so grpcs has to apply them again from
--- `grpc_access_phase` just like the client certificate does.
-local function set_upstream_ssl_opts(up_conf)
-    local tls = up_conf.tls
-    if not tls then
-        return true
-    end
-
-    if tls.verify ~= nil then
-        local ok, err = set_upstream_ssl_verify(tls.verify)
-        if not ok then
-            return nil, err
-        end
-    end
-
-    if tls.ca_certs then
-        local store, err = trusted_store_cache(tls.ca_certs, up_conf.resource_version,
-                                               create_trusted_store, tls.ca_certs)
-        if not store then
-            return nil, err
-        end
-
-        local ok, err = set_upstream_ssl_trusted_store(store)
-        if not ok then
-            return nil, err
-        end
-    end
-
-    return true
-end
-
 
 local set_stream_upstream_tls
-local set_stream_upstream_cert_and_key
 if not is_http then
     local ok, apisix_ngx_stream_upstream = pcall(require, "resty.apisix.stream.upstream")
     if ok then
         set_stream_upstream_tls = apisix_ngx_stream_upstream.set_tls
-        set_stream_upstream_cert_and_key = apisix_ngx_stream_upstream.set_cert_and_key
-    end
-    -- guard each function independently: an older runtime may expose the module
-    -- (set_tls) without the newer mTLS C-API (set_cert_and_key)
-    if not set_stream_upstream_tls then
+    else
         set_stream_upstream_tls = function ()
             return nil, "need to build APISIX-Runtime to support TLS over TCP upstream"
-        end
-    end
-    if not set_stream_upstream_cert_and_key then
-        set_stream_upstream_cert_and_key = function ()
-            return nil, "need to build APISIX-Runtime to support upstream mTLS over TCP"
         end
     end
 end
@@ -190,27 +98,10 @@ local scheme_to_port = {
     https = 443,
     grpc = 80,
     grpcs = 443,
-    ws = 80,
-    wss = 443,
 }
 
 
 _M.scheme_to_port = scheme_to_port
-
--- A bare (unbracketed) IPv6 host makes the "host:port" key the balancer and the
--- health checker build ambiguous (parse_addr reads the whole thing as an address
--- with no port). The Admin API rejects such hosts and check_upstream_conf brackets
--- them for configured upstreams, but service discovery returns nodes that reach
--- here without going through either.
---
--- Only a node that carries its own port is bracketed. A host given without one is
--- itself ambiguous - the map key "::1:1980" is a valid IPv6 literal as much as it
--- is host ::1 port 1980 - so it is left to the existing malformed-config handling.
--- Discovery endpoints always carry a port, so nothing real is missed.
-local function needs_ipv6_bracket(node)
-    return node.port and core.utils.parse_ipv6(node.host)
-                     and str_byte(node.host, 1) ~= str_byte("[")
-end
 
 -- 主要是如果node没有配置port, 则根据scheme填充默认node的端口: 80/443
 local function fill_node_info(up_conf, scheme, is_stream)
@@ -235,10 +126,6 @@ local function fill_node_info(up_conf, scheme, is_stream)
         if not n.priority then
             need_filled = true
         end
-
-        if needs_ipv6_bracket(n) then
-            need_filled = true
-        end
     end
 
     if not need_filled then
@@ -252,12 +139,10 @@ local function fill_node_info(up_conf, scheme, is_stream)
     -- keep the original nodes for slow path in `compare_upstream_node()`,
     -- can't use `core.table.deepcopy()` for whole `nodes` array here,
     -- because `compare_upstream_node()` compare `metadata` of node by address.
-    -- The original (bare) host is preserved there, so bracketing below does not
-    -- make discovery re-fetches look like a node change.
     up_conf.original_nodes = core.table.new(#nodes, 0)
     for i, n in ipairs(nodes) do
         up_conf.original_nodes[i] = core.table.clone(n)
-        if not n.port or not n.priority or needs_ipv6_bracket(n) then
+        if not n.port or not n.priority then
             nodes[i] = core.table.clone(n)
 
             if not is_stream and not n.port then
@@ -268,10 +153,6 @@ local function fill_node_info(up_conf, scheme, is_stream)
             if not n.priority then
                 nodes[i].priority = 0
             end
-
-            if needs_ipv6_bracket(n) then
-                nodes[i].host = "[" .. n.host .. "]"
-            end
         end
     end
 
@@ -279,64 +160,8 @@ local function fill_node_info(up_conf, scheme, is_stream)
     return true
 end
 
--- Set upstream client certificate (mTLS) for the stream (L4) subsystem.
--- Mirrors the http subsystem: the cert/key are parsed and cached once (the key
--- is AES-decrypted at rest by fetch_pkey) and applied to the upstream SSL
--- handshake through the apisix-nginx-module stream C API, so the plaintext key
--- is never stringified into an nginx variable.
-local function set_stream_upstream_client_cert(api_ctx, up_conf)
-    local tls = up_conf.tls
-    if not (tls and (tls.client_cert or tls.client_cert_id)) then
-        return true
-    end
-
-    local client_cert, client_key
-    if tls.client_cert_id then
-        if not api_ctx.upstream_ssl then
-            return nil, "failed to find upstream ssl object for client_cert_id"
-        end
-        client_cert = api_ctx.upstream_ssl.cert
-        client_key = api_ctx.upstream_ssl.key
-    else
-        client_cert = tls.client_cert
-        client_key = tls.client_key
-    end
-
-    if not (client_cert and client_key) then
-        return nil, "missing client certificate or key for upstream mTLS"
-    end
-
-    -- the sni here is just for logging
-    local sni = api_ctx.var.upstream_host
-    local cert, err = apisix_ssl.fetch_cert(sni, client_cert)
-    if not cert then
-        return nil, err
-    end
-
-    local key, err = apisix_ssl.fetch_pkey(sni, client_key)
-    if not key then
-        return nil, err
-    end
-
-    local ok, err = set_stream_upstream_cert_and_key(cert, key)
-    if not ok then
-        return nil, err
-    end
-
-    return true
-end
-
 -- service_name 与nodes 二选一，用于服务发现； 如果node个数>1, 创建健康检查器
 function _M.set_by_route(route, api_ctx)
-    -- Ahead of the traffic-split short circuit below so its inline upstream is
-    -- covered too. A second handshake would send the client's ClientHello as payload.
-    if api_ctx.tls_passthrough then
-        local passthrough_up = api_ctx.upstream_conf or api_ctx.matched_upstream
-        if passthrough_up and passthrough_up.scheme == "tls" then
-            return 503, "upstream scheme `tls` can not be used on a tls_passthrough listen"
-        end
-    end
-
     if api_ctx.upstream_conf then
         -- upstream_conf has been set by traffic-split plugin
         return
@@ -350,6 +175,7 @@ function _M.set_by_route(route, api_ctx)
 
     -- service_name 与nodes 二选一，用于服务发现
     if up_conf.service_name then
+        -- 服务发现
         if not discovery then
             return 503, "discovery is uninitialized"
         end
@@ -428,15 +254,11 @@ function _M.set_by_route(route, api_ctx)
             if sni then
                 ngx_var.upstream_sni = sni
             end
-
-            local ok, err = set_stream_upstream_client_cert(api_ctx, up_conf)
-            if not ok then
-                return 503, err
-            end
         end
         local node_ver = resource.get_nodes_ver(up_conf.resource_key)
         local resource_version = upstream_util.version(up_conf.resource_version,
                                                                       node_ver)
+        -- 获取健康检查器，如果不存在，则创建
         local checker = healthcheck_manager.fetch_checker(up_conf.resource_key, resource_version)
         api_ctx.up_checker = checker
         return
@@ -453,19 +275,11 @@ function _M.set_by_route(route, api_ctx)
     local node_ver = resource.get_nodes_ver(up_conf.resource_key)
     local resource_version = upstream_util.version(up_conf.resource_version,
                                                                   node_ver )
+    -- 获取健康检查器，如果不存在，则创建
     local checker = healthcheck_manager.fetch_checker(up_conf.resource_key, resource_version)
     api_ctx.up_checker = checker
     -- ssl相关
     local scheme = up_conf.scheme
-    if scheme == "https" then
-        -- grpcs applies these in `set_grpcs_upstream_param` instead, after the
-        -- internal redirect that drops the settings made here
-        local ok, err = set_upstream_ssl_opts(up_conf)
-        if not ok then
-            return 503, err
-        end
-    end
-
     local tls_has_cert = up_conf.tls and (up_conf.tls.client_cert or up_conf.tls.client_cert_id)
     if (scheme == "https" or scheme == "grpcs") and tls_has_cert then
         local client_cert, client_key
@@ -481,12 +295,12 @@ function _M.set_by_route(route, api_ctx)
         local sni = api_ctx.var.upstream_host
         -- 根据 sni 查找证书
         local cert, err = apisix_ssl.fetch_cert(sni, client_cert)
-        if not cert then
+        if not ok then
             return 503, err
         end
 
         local key, err = apisix_ssl.fetch_pkey(sni, client_key)
-        if not key then
+        if not ok then
             return 503, err
         end
 
@@ -506,13 +320,6 @@ end
 
 
 function _M.set_grpcs_upstream_param(ctx)
-    if ctx.upstream_conf and ctx.upstream_conf.scheme == "grpcs" then
-        local ok, err = set_upstream_ssl_opts(ctx.upstream_conf)
-        if not ok then
-            return 503, err
-        end
-    end
-
     if ctx.upstream_grpcs_cert then
         local cert = ctx.upstream_grpcs_cert
         local key = ctx.upstream_grpcs_key
@@ -569,68 +376,12 @@ local function get_chash_key_schema(hash_on)
 end
 
 
--- Constraints of `warm_up_conf` within one upstream that JSON schema cannot
--- express. A ramp needs a single roundrobin tier to work in, so a combination it
--- could never act on is rejected at the Admin API rather than accepted and
--- ignored. Where the upstream is used is a different question: like every other
--- field that only applies to HTTP, `warm_up_conf` is simply ignored on the
--- stream path.
---
--- This runs on the configuration entry points only, never on the data plane
--- checker: a configuration that reaches a running gateway some other way - it is
--- written to etcd or to a standalone config file directly, or it is embedded in a
--- route or a service, neither of which runs this - must not take the whole
--- upstream out of service over a field
--- that only accelerates a ramp. `slow_start.usable()` logs and keeps proxying
--- with the configured weights there.
-local function check_warm_up_conf(conf)
-    local warm_up_conf = conf.warm_up_conf
-    if not warm_up_conf then
-        return true
-    end
-
-    if (conf.type or "roundrobin") ~= "roundrobin" then
-        return false, "warm_up_conf is only supported by the roundrobin upstream type"
-    end
-
-    local interval = warm_up_conf.interval or 1
-    if interval > warm_up_conf.slow_start_time_seconds then
-        return false, "warm_up_conf.interval can't be greater than " ..
-                      "warm_up_conf.slow_start_time_seconds"
-    end
-
-    -- APISIX drains the highest priority tier before it uses the next one, so a
-    -- weight ramp inside one tier can't hold traffic back from a new node in a
-    -- tier above the mature ones
-    local nodes = conf.nodes
-    if nodes and core.table.isarray(nodes) then
-        local priority
-        for i, node in ipairs(nodes) do
-            local node_priority = node.priority or 0
-            if i == 1 then
-                priority = node_priority
-            elseif node_priority ~= priority then
-                return false, "warm_up_conf doesn't support an upstream with " ..
-                              "nodes of different priorities"
-            end
-        end
-    end
-
-    return true
-end
-_M.check_warm_up_conf = check_warm_up_conf
-
-
+-- core.config.new("/upstreams", opts) 中的checker
 local function check_upstream_conf(in_dp, conf)
     if not in_dp then
         local ok, err = check_schema(conf)
         if not ok then
             return false, "invalid configuration: " .. err
-        end
-
-        local ok, err = check_warm_up_conf(conf)
-        if not ok then
-            return false, err
         end
 
         if conf.nodes and not core.table.isarray(conf.nodes) then
@@ -692,15 +443,6 @@ local function check_upstream_conf(in_dp, conf)
         end
     end
 
-    if conf.tls and conf.tls.ca_certs then
-        for _, ca_cert in ipairs(conf.tls.ca_certs) do
-            local ok, err = apisix_ssl.validate(ca_cert)
-            if not ok then
-                return false, err
-            end
-        end
-    end
-
     if conf.type ~= "chash" then
         return true
     end
@@ -738,10 +480,14 @@ function _M.encrypt_conf(conf)
 end
 
 
+-- core.config.new("/upstreams", opts) 中的filter
+-- 逻辑主要为更新value.nodes格式(hash格式改为array格式)。设置parent.has_domain、value.dns_nodes等字段
 local function filter_upstream(value, parent)
     if not value then
         return
     end
+    -- 其resource_key和resource_version来自于parent
+    -- 如果parent不为nil, 表示upstream是内嵌在其他实体上的，如route中内嵌的upstream
     value.resource_key = parent and parent.key
     value.resource_version = ((parent and parent.modifiedIndex) or value.modifiedIndex)
     value.resource_id = ((parent and parent.value.id) or value.id)
@@ -750,6 +496,9 @@ local function filter_upstream(value, parent)
         value.scheme = "tcp"
     end
 
+    -- https://apisix.apache.org/zh/docs/apisix/admin-api/#upstream
+    -- nodes与service_name二选一。nodes可以是hash表或数组。如果是hash表，key为ip:port, value为权重;
+    -- 如果是数组，每个元素为{host, port, weight}
     if not value.nodes then
         return
     end
@@ -762,18 +511,23 @@ local function filter_upstream(value, parent)
             local host = node.host
             if not core.utils.parse_ipv4(host) and
                     not core.utils.parse_ipv6(host) then
+                -- 标识是一个域名
                 parent.has_domain = true
                 break
             end
         end
     else
+        -- 将hash格式改为array格式new_nodes
         local new_nodes = core.table.new(core.table.nkeys(nodes), 0)
+        -- 当为hash时，key为host:port, value为权重;
         for addr, weight in pairs(nodes) do
             local host, port = core.utils.parse_addr(addr)
             if not core.utils.parse_ipv4(host) and
                     not core.utils.parse_ipv6(host) then
+                -- 说明host是域名
                 parent.has_domain = true
             end
+            -- 构建一个node
             local node = {
                 host = host,
                 port = port,
@@ -781,6 +535,7 @@ local function filter_upstream(value, parent)
             }
             core.table.insert(new_nodes, node)
         end
+        -- 更新value.nodes为array格式
         value.nodes = new_nodes
     end
     if parent.has_domain then
@@ -790,8 +545,10 @@ end
 _M.filter_upstream = filter_upstream
 
 
+-- apisix.http_init_worker() -> .
 function _M.init_worker()
     local err
+    -- 启动 /upstreams 监听
     upstreams, err = core.config.new("/upstreams", {
             automatic = true,
             item_schema = core.schema.upstream,
@@ -812,6 +569,7 @@ function _M.init_worker()
         return
     end
     healthcheck_manager = require("apisix.healthcheck_manager")
+    -- 健康检查管理器初始化
     healthcheck_manager.init_worker()
 end
 

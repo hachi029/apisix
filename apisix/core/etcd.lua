@@ -25,6 +25,7 @@ local array_mt          = require("apisix.core.json").array_mt
 local log               = require("apisix.core.log")
 local try_read_attr     = require("apisix.core.table").try_read_attr
 local v3_adapter        = require("apisix.admin.v3_adapter")
+-- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md
 local etcd              = require("resty.etcd")
 local clone_tab         = require("table.clone")
 local health_check      = require("resty.etcd.health_check")
@@ -42,12 +43,14 @@ local _M = {}
 local NOT_ALLOW_WRITE_ETCD_WARN = 'Data plane role should not write to etcd. ' ..
     'This operation will be deprecated in future releases.'
 
+-- 当前节点是否是data_plane
 local function is_data_plane()
     local local_conf, err = fetch_local_conf()
     if not local_conf then
         return nil, err
     end
 
+    -- 读取conf/config.yaml  deployment.role == 'data_plane' ?
     local role = try_read_attr(local_conf, "deployment", "role")
     if role == "data_plane" then
         return true
@@ -58,6 +61,7 @@ end
 
 
 
+-- 如果是data_plane，则不允许写etcd操作
 local function disable_write_if_data_plane()
     local data_plane, err = is_data_plane()
     if err then
@@ -78,6 +82,7 @@ local function disable_write_if_data_plane()
 end
 
 
+-- 封装etcd_cli， 确认data_plane对etcd_server是只读的(对于数据节点，如果是写操作，直接返回错误)
 local function wrap_etcd_client(etcd_cli)
     -- note: methods txn can read and write, don't use txn to write when data plane role
     local methods_to_wrap = {
@@ -98,16 +103,19 @@ local function wrap_etcd_client(etcd_cli)
             return nil, "method " .. method .. " not found in etcd client"
         end
 
+        -- 保存原始方法
         original_methods[method] = etcd_cli[method]
     end
 
     for _, method in ipairs(methods_to_wrap) do
         etcd_cli[method] = function(self, ...)
+            -- 在原始方法前加了下边这段逻辑，确认data_plane对etcd_server是只读的
             local disable, err = disable_write_if_data_plane()
             if disable then
                 return nil, err
             end
 
+            -- 然后再调用原始的方法
             return original_methods[method](self, ...)
         end
     end
@@ -116,6 +124,8 @@ local function wrap_etcd_client(etcd_cli)
 end
 
 
+-- 创建etcd 客户端
+-- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md#new
 local function _new(etcd_conf)
     local prefix = etcd_conf.prefix
     etcd_conf.http_host = etcd_conf.host
@@ -141,6 +151,7 @@ local function _new(etcd_conf)
         end
     end
 
+    -- https://github.com/api7/lua-resty-etcd/blob/master/api_v3.md#new
     local etcd_cli, err = etcd.new(etcd_conf)
     if not etcd_cli then
         return nil, nil, err
@@ -341,6 +352,8 @@ function _M.get_format(res, real_key, is_dir, formatter)
 end
 
 
+-- v3res 格式化为 v2res
+-- v3res: [{"kv":{"value":{"plugins":{"public-api":{}},"id":"1","uri":"/apisix/batch-requests","update_time":1764225975,"create_time":1764157231},"version":"16","key":"/apisix/routes/1","create_revision":"68","mod_revision":"385"}}]
 function _M.watch_format(v3res)
     local v2res = {}
     v2res.headers = {

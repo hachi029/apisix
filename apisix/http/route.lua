@@ -19,6 +19,7 @@ local radixtree = require("resty.radixtree")
 local router = require("apisix.utils.router")
 local service_fetch = require("apisix.http.service").get
 local core = require("apisix.core")
+-- https://github.com/api7/lua-resty-expr
 local expr = require("resty.expr.v1")
 local plugin_checker = require("apisix.plugin").plugin_checker
 local event = require("apisix.core.event")
@@ -31,20 +32,25 @@ local loadstring = loadstring
 local _M = {}
 
 
+-- 当路由配置变更时，调用此方法重建路由
 function _M.create_radixtree_uri_router(routes, uri_routes, with_parameter)
     routes = routes or {}
 
     core.table.clear(uri_routes)
 
+    -- https://apisix.apache.org/docs/apisix/admin-api/#request-body-parameters
     for _, route in ipairs(routes) do
         if type(route) == "table" then
+            -- 路由是否启用：1 to enable, 0 to disable
             local status = core.table.try_read_attr(route, "value", "status")
             -- check the status
             if status and status == 0 then
                 goto CONTINUE
             end
 
-            -- 初始化route.filter_fun. route的script字段，script一般绑定在route上
+            -- 初始化route.filter_fun.
+            -- Matches using a user-defined function in Lua. Used in scenarios where vars is not sufficient.
+            -- Functions accept an argument vars which provides access to built-in variables (including Nginx variables).
             local filter_fun, err
             if route.value.filter_func then
                 filter_fun, err = loadstring(
@@ -59,7 +65,7 @@ function _M.create_radixtree_uri_router(routes, uri_routes, with_parameter)
                 filter_fun = filter_fun()
             end
 
-            -- 如果route没配置hosts, 使用service的hoosts
+            -- 如果route没配置hosts, 使用service的hosts
             local hosts = route.value.hosts or route.value.host
             if not hosts and route.value.service_id then
                 local service = service_fetch(route.value.service_id)
@@ -84,7 +90,9 @@ function _M.create_radixtree_uri_router(routes, uri_routes, with_parameter)
                                or route.value.remote_addr,
                 vars = route.value.vars,  --{{"arg_name", "==", "json"}, {...}}
                 filter_fun = filter_fun,  -- 自定义匹配场景
+                -- 当路由匹配上时，handler 会被回调
                 handler = function (api_ctx, match_opts) -- will be called when a route matches while using rx:dispatch
+                    -- api_ctx 为请求上下文
                     api_ctx.matched_params = nil
                     api_ctx.matched_route = route
                     api_ctx.curr_req_matched = match_opts.matched
@@ -100,6 +108,7 @@ function _M.create_radixtree_uri_router(routes, uri_routes, with_parameter)
 
     -- 调用的还是resty.radixtree.new(). 不同之处只在于传递的opts参数中no_param_match是true or false
     if with_parameter then
+        -- https://github.com/api7/lua-resty-radixtree
         return radixtree.new(uri_routes)
     else
         return router.new(uri_routes)
@@ -118,12 +127,14 @@ function _M.match_uri(uri_router, api_ctx)
     -- 参考 create_radixtree_uri_router
     -- match_opts是除了uri之外的附加的匹配参数
     -- dispatch会调用匹配到的router上的handler方法
+    -- https://github.com/api7/lua-resty-radixtree?tab=readme-ov-file#dispatch
     local ok = uri_router:dispatch(api_ctx.var.uri, match_opts, api_ctx, match_opts)
     core.tablepool.release("route_match_opts", match_opts)
     return ok
 end
 
 
+-- 自定义的scheme check逻辑
 -- additional check for synced route configuration, run after schema check
 local function check_route(route)
     local ok, err = plugin_checker(route)
@@ -131,7 +142,9 @@ local function check_route(route)
         return nil, err
     end
 
+    -- 匹配规则， 由一个或多个[var, operator, val]元素组成的列表。例如：["arg_name", "==", "json"] 则表示当前请求参数 name 是 json
     if route.vars then
+        -- https://github.com/api7/lua-resty-expr
         ok, err = expr.new(route.vars)
         if not ok then
             return nil, "failed to validate the 'vars' expression: " .. err

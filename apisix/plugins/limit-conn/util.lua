@@ -54,6 +54,7 @@ local function generate_redis_sha1(red)
 end
 
 
+-- 对key +1 , 判断是否超出max 、或超出 max+burst
 function _M.incoming(self, red, key, commit)
     local max = self.max
     self.committed = false

@@ -20,6 +20,7 @@ local plugin         = require("apisix.plugin")
 local error = error
 
 
+-- core.config.new("/consumer_groups", opt)
 local consumer_groups
 
 
@@ -49,6 +50,7 @@ function _M.init_worker()
 end
 
 
+-- 返回所有的consumer_group
 function _M.consumer_groups()
     if not consumer_groups then
         return nil, nil
@@ -57,6 +59,7 @@ function _M.consumer_groups()
 end
 
 
+-- 根据consumer_group_id获取consumer_group
 function _M.get(id)
     return consumer_groups:get(id)
 end

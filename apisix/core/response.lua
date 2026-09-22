@@ -67,6 +67,7 @@ do
     local t = {}
     local idx = 1
 
+-- ngx.exit(code, body) ... 支持table
 function resp_exit(code, ...)
     clear_tab(t)
     idx = 0
@@ -159,10 +160,13 @@ function resp_exit(code, ...)
         end
     end
 
+    -- 输出响应体
     if idx > 0 then
         ngx_print(t)
     end
 
+    -- 调用ngx.exit(code), 返回到nginx
+    -- https://github.com/openresty/lua-nginx-module?tab=readme-ov-file#ngxexit
     if code then
         local ctx = ngx.ctx.api_ctx
         if ctx and not ctx._resp_source then
@@ -239,6 +243,7 @@ function _M.get_upstream_status(ctx)
     return tonumber(str_sub(ctx.var.upstream_status or "", -3))
 end
 
+
 --- Explicitly set the response source for this request.
 -- Use this in plugins that bypass NGINX proxy (e.g. ai-proxy) to indicate
 -- whether the response originated from the upstream service.
@@ -308,7 +313,7 @@ function _M.get_response_source(ctx)
     return "apisix"
 end
 
--- 当修改响应体时，需要修改的响应头
+
 function _M.clear_header_as_body_modified()
     ngx.header.content_length = nil
     -- in case of upstream content is compressed content
@@ -332,57 +337,48 @@ end
 --  ...
 -- 每个chunk保存到ctx._body_buffer中。ctx._body_buffer key为插件名称，value为chunk array
 -- return nil 表示响应体还没读完
-function _M.hold_body_chunk(ctx, hold_the_copy, max_resp_body_bytes, body_buffer_key)
+function _M.hold_body_chunk(ctx, hold_the_copy, max_resp_body_bytes)
     local body_buffer
     local chunk, eof = arg[1], arg[2]
-    local buffer_key = body_buffer_key or ctx._plugin_name
 
     if not ctx._body_buffer then
         ctx._body_buffer = {}
     end
 
     if type(chunk) == "string" and chunk ~= "" then
-        body_buffer = ctx._body_buffer[buffer_key]
-        if body_buffer and body_buffer.done then
-            return nil
-        end
-
+        body_buffer = ctx._body_buffer[ctx._plugin_name]
         if not body_buffer then
             body_buffer = {
                 chunk,
-                n = 1,
-                bytes = #chunk,
+                n = 1
             }
-            ctx._body_buffer[buffer_key] = body_buffer
+            ctx._body_buffer[ctx._plugin_name] = body_buffer
+            ctx._resp_body_bytes = #chunk
         else
             local n = body_buffer.n + 1
             body_buffer.n = n
             body_buffer[n] = chunk
-            body_buffer.bytes = body_buffer.bytes + #chunk
+            ctx._resp_body_bytes = ctx._resp_body_bytes + #chunk
         end
         -- 如果达到了最大响应体大小，返回
-        if max_resp_body_bytes and body_buffer.bytes >= max_resp_body_bytes then
+        if max_resp_body_bytes and ctx._resp_body_bytes >= max_resp_body_bytes then
             local body_data = concat_tab(body_buffer, "", 1, body_buffer.n)
             body_data = str_sub(body_data, 1, max_resp_body_bytes)
-            body_buffer.done = true
             return body_data
         end
     end
 
     if eof then     -- 最后一个chunk
-        body_buffer = ctx._body_buffer[buffer_key]
+        body_buffer = ctx._body_buffer[ctx._plugin_name]
         if not body_buffer then
             if max_resp_body_bytes and #chunk >= max_resp_body_bytes then
                 chunk = str_sub(chunk, 1, max_resp_body_bytes)
             end
             return chunk
         end
-        if body_buffer.done then
-            return nil
-        end
 
         local body_data = concat_tab(body_buffer, "", 1, body_buffer.n)
-        ctx._body_buffer[buffer_key] = nil
+        ctx._body_buffer[ctx._plugin_name] = nil
         return body_data
     end
 

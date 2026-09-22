@@ -72,14 +72,7 @@ local function get_request_body(max_bytes)
     return req_body
 end
 
---解析json格式的log_format: "log_format": {
---        "host": "$host",
---        "@timestamp": "$time_iso8601",
---        "client_ip": "$remote_addr"
---    }
--- 配置完成后，日志格式：
--- {"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
---{"host":"localhost","@timestamp":"2020-09-23T19:05:05-04:00","client_ip":"127.0.0.1","route_id":"1"}
+
 local function do_gen_log_format(format, depth)
     local log_format = {}
     for k, var_name in pairs(format) do
@@ -107,7 +100,7 @@ local function gen_log_format(format)
     return log_format
 end
 
--- 根据log_format返回真实的log
+
 local function build_log_entry(ctx, log_format, max_req_body_bytes)
     local entry = core.table.new(0, core.table.nkeys(log_format))
     for k, var_attr in pairs(log_format) do
@@ -126,7 +119,7 @@ local function build_log_entry(ctx, log_format, max_req_body_bytes)
             end
         elseif type(var_attr[2]) == "table" then
             entry[k] = build_log_entry(ctx, var_attr[2], max_req_body_bytes)
-        else        --字面量
+        else
             entry[k] = var_attr[2]
         end
     end
@@ -211,7 +204,7 @@ local function get_full_log(ngx, conf)
             url = url,
             uri = var.request_uri,
             method = ngx.req.get_method(),
-            headers = ctx.data_mask_headers or ngx.req.get_headers(),
+            headers = ngx.req.get_headers(),
             querystring = ngx.req.get_uri_args(),
             size = var.request_length
         },
@@ -311,20 +304,9 @@ function _M.get_log_entry(plugin_name, conf, ctx)
 
     local entry
     local customized = false
-    -- resolved log_format_extra fields, surfaced to callers that rebuild a
-    -- fixed payload (e.g. google-cloud-logging, splunk) so extras aren't dropped
-    local extra_entry
 
     local has_meta_log_format = metadata and metadata.value.log_format
         and core.table.nkeys(metadata.value.log_format) > 0
-
-    -- conf value wins when present (even if empty), matching log_format;
-    -- only fall back to plugin metadata when conf has no log_format_extra
-    local log_format_extra = conf.log_format_extra
-    if log_format_extra == nil and metadata and metadata.value.log_format_extra then
-        log_format_extra = metadata.value.log_format_extra
-    end
-    local has_extra = log_format_extra and core.table.nkeys(log_format_extra) > 0
 
     if conf.log_format or has_meta_log_format then
         customized = true
@@ -333,22 +315,6 @@ function _M.get_log_entry(plugin_name, conf, ctx)
     else
         if is_http then
             entry = get_full_log(ngx, conf)
-            -- enrich the default rich log with extra user-defined fields without
-            -- replacing it, so callers keep every default field and add their own
-            if has_extra then
-                -- get_custom_format_log also appends route_id/service_id; keep only
-                -- the user-declared keys so callers don't leak unrequested fields
-                local tmp = get_custom_format_log(ctx, log_format_extra,
-                                                  conf.max_req_body_bytes)
-                extra_entry = {}
-                for k in pairs(log_format_extra) do
-                    extra_entry[k] = tmp[k]
-                    -- never clobber a default field, only add new ones
-                    if entry[k] == nil then
-                        entry[k] = tmp[k]
-                    end
-                end
-            end
         else
             -- get_full_log doesn't work in stream
             core.log.error(plugin_name, "'s log_format is not set")
@@ -364,7 +330,7 @@ function _M.get_log_entry(plugin_name, conf, ctx)
     if ctx.llm_response_text then
         entry.llm_response_text = ctx.llm_response_text
     end
-    return entry, customized, extra_entry
+    return entry, customized
 end
 
 -- 获取文本格式的请求报文
@@ -372,7 +338,7 @@ function _M.get_req_original(ctx, conf)
     local data = {
         ctx.var.request, "\r\n"
     }
-    for k, v in pairs(ctx.data_mask_headers or ngx.req.get_headers()) do
+    for k, v in pairs(ngx.req.get_headers()) do
         core.table.insert_tail(data, k, ": ", v, "\r\n")
     end
     core.table.insert(data, "\r\n")
@@ -432,7 +398,11 @@ function _M.collect_body(conf, ctx)
         if log_response_body then
             local max_resp_body_bytes = conf.max_resp_body_bytes or MAX_RESP_BODY
 
-            local final_body = core.response.hold_body_chunk(ctx, true, max_resp_body_bytes, conf)
+            -- 读取到的响应体已经大于max_resp_body_bytes了
+            if ctx._resp_body_bytes and ctx._resp_body_bytes >= max_resp_body_bytes then
+                return
+            end
+            local final_body = core.response.hold_body_chunk(ctx, true, max_resp_body_bytes)
             if not final_body then      -- 为nil 表示不是最后一个chunk
                 return
             end
