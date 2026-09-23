@@ -99,7 +99,7 @@ function _M.fetch_by_uri(env_uri)
     end
 
     -- 读取环境变量
-    local main_value = apisix_env_vars[opts.key] or os.getenv(opts.key)
+    local main_value = _M.get(opts.key)
     if main_value and opts.sub_key ~= "" then
         local vt, err = json.decode(main_value)
         if not vt then
